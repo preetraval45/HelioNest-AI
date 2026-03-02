@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: helionest
+  labels:
+    app.kubernetes.io/name: helionest
+    app.kubernetes.io/part-of: helionest-ai

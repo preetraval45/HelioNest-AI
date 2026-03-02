@@ -1,0 +1,38 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+bases:
+  - ../../
+
+namePrefix: staging-
+
+patches:
+  # Scale down to 1 replica in staging to save resources
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+    target:
+      kind: Deployment
+      name: backend
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+    target:
+      kind: Deployment
+      name: frontend
+
+configMapGenerator:
+  - name: helionest-config
+    behavior: merge
+    literals:
+      - ENVIRONMENT=staging
+      - DEBUG=false
+      - NEXT_PUBLIC_API_URL=https://api.staging.helionest.app
+
+images:
+  - name: helionest/backend
+    newTag: staging
+  - name: helionest/frontend
+    newTag: staging

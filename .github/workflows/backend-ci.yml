@@ -1,0 +1,79 @@
+name: Backend CI
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "backend/**"
+
+jobs:
+  lint-and-test:
+    name: Lint & Test (Python)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgis/postgis:15-3.3-alpine
+        env:
+          POSTGRES_USER: helionest
+          POSTGRES_PASSWORD: helionest
+          POSTGRES_DB: helionest_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Lint with ruff
+        run: ruff check .
+
+      - name: Type check (basic import test)
+        run: python -c "from app.main import app; print('Import OK')"
+        env:
+          DATABASE_URL: postgresql+asyncpg://helionest:helionest@localhost:5432/helionest_test
+          REDIS_URL: redis://localhost:6379/0
+          ANTHROPIC_API_KEY: test-key
+          SECRET_KEY: test-secret
+
+      - name: Run tests
+        run: pytest --cov=app --cov-report=term-missing -v
+        env:
+          DATABASE_URL: postgresql+asyncpg://helionest:helionest@localhost:5432/helionest_test
+          REDIS_URL: redis://localhost:6379/0
+          ANTHROPIC_API_KEY: test-key
+          SECRET_KEY: test-secret

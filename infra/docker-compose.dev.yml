@@ -1,0 +1,35 @@
+version: "3.9"
+
+# Development overrides — hot reload for both backend and frontend
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+services:
+  postgres:
+    ports:
+      - "5432:5432"
+
+  redis:
+    ports:
+      - "6379:6379"
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ../backend:/app           # mount source for hot reload
+    environment:
+      DEBUG: "true"
+      ENVIRONMENT: development
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ../frontend:/app          # mount source for hot reload
+      - /app/node_modules         # preserve node_modules inside container
+    environment:
+      NODE_ENV: development
+    command: npm run dev

@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+bases:
+  - ../../
+
+configMapGenerator:
+  - name: helionest-config
+    behavior: merge
+    literals:
+      - ENVIRONMENT=production
+      - DEBUG=false
+      - NEXT_PUBLIC_API_URL=https://api.helionest.app
+
+images:
+  - name: helionest/backend
+    newTag: production
+  - name: helionest/frontend
+    newTag: production
