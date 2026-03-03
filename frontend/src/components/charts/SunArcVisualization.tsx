@@ -414,9 +414,11 @@ export default function SunArcVisualization({
           {presets.map(({ key, label }) => (
             <button
               key={key}
+              type="button"
+              aria-current={preset === key ? "true" : undefined}
               onClick={() => setPreset(key)}
               className={[
-                "px-2 py-0.5 rounded text-xs font-medium transition-colors",
+                "px-2 py-0.5 rounded text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/70",
                 preset === key
                   ? "bg-solar-400 text-space-950"
                   : "bg-th-bg-2 text-th-muted hover:text-th-text",
@@ -431,31 +433,23 @@ export default function SunArcVisualization({
       <svg
         ref={svgRef}
         viewBox={`0 0 ${W} ${H}`}
-        className="w-full"
-        style={{ height: "auto" }}
+        role="img"
+        aria-label={`Sun elevation arc chart for ${preset === "today" ? "today" : preset === "summer" ? "summer solstice" : "winter solstice"} at latitude ${lat.toFixed(2)}°`}
+        className="w-full h-auto"
       />
 
       <div className="flex items-center gap-4 mt-2 text-xs text-th-muted">
         <span className="flex items-center gap-1">
-          <span
-            className="inline-block w-4 h-0.5 rounded"
-            style={{ background: "#fbbf24" }}
-          />
+          <span className="inline-block w-4 h-0.5 rounded bg-amber-400" />
           Above horizon
         </span>
         <span className="flex items-center gap-1">
-          <span
-            className="inline-block w-4 h-0.5 rounded opacity-50"
-            style={{ background: "#818cf8", borderTop: "1px dashed #818cf8" }}
-          />
+          <span className="inline-block w-4 h-0.5 rounded opacity-50 bg-indigo-400 border-t border-dashed border-indigo-400" />
           Below horizon
         </span>
         {preset === "today" && (
           <span className="flex items-center gap-1">
-            <span
-              className="inline-block w-2 h-2 rounded-full"
-              style={{ background: "#fbbf24" }}
-            />
+            <span className="inline-block w-2 h-2 rounded-full bg-amber-400" />
             Current position
           </span>
         )}

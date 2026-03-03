@@ -1,14 +1,21 @@
 # ── Stage 1: build deps ────────────────────────────────────────────────────────
-FROM python:3.11-slim AS builder
+FROM python:3.13-slim AS builder
 
 WORKDIR /build
 
 COPY requirements.txt .
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir --prefix=/install -r requirements.txt
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        gcc \
+        g++ \
+        cmake \
+    && pip install --upgrade pip \
+    && pip install --no-cache-dir --prefix=/install -r requirements.txt \
+    && apt-get purge -y --auto-remove build-essential gcc g++ cmake \
+    && rm -rf /var/lib/apt/lists/*
 
 # ── Stage 2: production image ──────────────────────────────────────────────────
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 # Non-root user for security
 RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser

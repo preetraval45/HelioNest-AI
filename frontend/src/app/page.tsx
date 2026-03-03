@@ -102,8 +102,9 @@ export default function HomePage() {
               type="text"
               value={address}
               onChange={(e) => { setAddress(e.target.value); setError(""); }}
-              placeholder="123 Main St, Charlotte, NC 28201"
+              placeholder="Enter any U.S. street address…"
               className="flex-1 px-4 py-3 text-sm bg-transparent outline-none text-th-text placeholder:text-th-muted"
+              autoComplete="street-address"
             />
             <button type="submit" className="btn-solar px-6 py-3 rounded-xl text-sm font-semibold shrink-0">
               Analyze →

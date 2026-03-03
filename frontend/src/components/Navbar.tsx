@@ -7,7 +7,7 @@ import { ThemeToggle } from "./ThemeToggle";
 const NAV_LINKS = [
   { href: "/dashboard", label: "Dashboard" },
   { href: "/chat",      label: "AI Chat" },
-];
+] as const;
 
 export function Navbar() {
   const pathname = usePathname();

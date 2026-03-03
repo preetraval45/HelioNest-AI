@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from urllib.parse import quote as url_quote
 
 import httpx
 
@@ -29,6 +30,8 @@ US_STATES = {
 
 GEOCODIO_URL = "https://api.geocod.io/v1.7/geocode"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+CENSUS_GEOCODER_URL = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
+MAPBOX_GEOCODING_URL = "https://api.mapbox.com/geocoding/v5/mapbox.places/{}.json"
 
 REQUEST_TIMEOUT = 10.0  # seconds
 
@@ -112,7 +115,7 @@ async def _geocode_via_nominatim(address: str) -> GeocodedLocation | None:
         "countrycodes": "us",
         "addressdetails": 1,
     }
-    headers = {"User-Agent": "HelioNest-AI/1.0 (helionest@example.com)"}
+    headers = {"User-Agent": "HelioNest-AI/1.0 contact:helionest-app@proton.me"}
 
     try:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
@@ -153,6 +156,106 @@ async def _geocode_via_nominatim(address: str) -> GeocodedLocation | None:
     return None
 
 
+# ── Mapbox Geocoding API ───────────────────────────────────────────────────────
+
+async def _geocode_via_mapbox(address: str) -> GeocodedLocation | None:
+    """Call Mapbox Geocoding API (v5). Returns None if token not set or request fails."""
+    if not settings.MAPBOX_TOKEN:
+        return None
+
+    url = MAPBOX_GEOCODING_URL.format(url_quote(address))
+    params = {
+        "access_token": settings.MAPBOX_TOKEN,
+        "country": "us",
+        "limit": 1,
+        "types": "address",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        logger.warning("Mapbox geocoding request failed: %s", exc)
+        return None
+
+    features = data.get("features", [])
+    if not features:
+        return None
+
+    best = features[0]
+    coords = best.get("geometry", {}).get("coordinates", [0, 0])
+    lon, lat = float(coords[0]), float(coords[1])
+
+    # Parse context array for postcode / place / region
+    zip_code = ""
+    city = ""
+    state_code = ""
+    for ctx in best.get("context", []):
+        ctx_id = ctx.get("id", "")
+        if ctx_id.startswith("postcode"):
+            zip_code = ctx.get("text", "").split("-")[0]
+        elif ctx_id.startswith("place"):
+            city = ctx.get("text", "")
+        elif ctx_id.startswith("region"):
+            short_code = ctx.get("short_code", "").replace("US-", "").upper()
+            if short_code in US_STATES:
+                state_code = short_code
+
+    if not state_code:
+        return None  # Non-US or couldn't determine state
+
+    return GeocodedLocation(
+        formatted_address=best.get("place_name", address),
+        lat=lat,
+        lon=lon,
+        city=city,
+        state=state_code,
+        zip=zip_code,
+    )
+
+
+# ── US Census Geocoder (free, no key, US only) ─────────────────────────────────
+
+async def _geocode_via_census(address: str) -> GeocodedLocation | None:
+    """Call the free US Census Bureau geocoder — no API key required."""
+    params = {
+        "address": address,
+        "benchmark": "2020",
+        "format": "json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            resp = await client.get(CENSUS_GEOCODER_URL, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        logger.warning("Census geocoder request failed: %s", exc)
+        return None
+
+    matches = data.get("result", {}).get("addressMatches", [])
+    if not matches:
+        return None
+
+    best = matches[0]
+    coords = best.get("coordinates", {})
+    components = best.get("addressComponents", {})
+
+    state = components.get("state", "").upper()
+    if state not in US_STATES:
+        return None
+
+    city = components.get("city", "") or components.get("unincorporatedPlace", "")
+    return GeocodedLocation(
+        formatted_address=best.get("matchedAddress", address),
+        lat=float(coords.get("y", 0)),
+        lon=float(coords.get("x", 0)),
+        city=city,
+        state=state,
+        zip=components.get("zip", ""),
+    )
+
+
 def _state_name_to_abbr(name: str) -> str:
     """Convert full state name to 2-letter abbreviation."""
     mapping = {
@@ -180,8 +283,10 @@ async def geocode_address(address: str) -> GeocodedLocation:
 
     1. Check Redis cache (TTL: 7 days)
     2. Try Geocodio (if API key is set)
-    3. Fall back to Nominatim
-    4. Raise GeocodingError if nothing works
+    3. Try Mapbox (if MAPBOX_TOKEN is set) — comprehensive US address coverage
+    4. Fall back to US Census Geocoder (free, no key)
+    5. Fall back to Nominatim
+    6. Raise GeocodingError if nothing works
     """
     slug = _address_slug(address)
     cache_key = make_cache_key("geocode", slug)
@@ -192,8 +297,12 @@ async def geocode_address(address: str) -> GeocodedLocation:
         logger.debug("Geocode cache hit: %s", slug)
         return GeocodedLocation(**cached)
 
-    # Try providers in order
+    # Try providers in order: Geocodio → Mapbox → Census → Nominatim
     result = await _geocode_via_geocodio(address)
+    if result is None:
+        result = await _geocode_via_mapbox(address)
+    if result is None:
+        result = await _geocode_via_census(address)
     if result is None:
         result = await _geocode_via_nominatim(address)
 

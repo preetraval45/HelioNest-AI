@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
+import { trackEvent } from "@/components/PostHogProvider";
 
 interface AddressSearchProps {
   defaultValue?: string;
@@ -38,6 +39,7 @@ export default function AddressSearch({
       return;
     }
     setError("");
+    trackEvent("address_searched", { address: trimmed });
     if (onResult) {
       onResult(trimmed);
     } else {
@@ -48,7 +50,7 @@ export default function AddressSearch({
   return (
     <div className={className}>
       <form onSubmit={handleSubmit}>
-        <div className={`flex gap-2 bg-white border border-gray-200 shadow-sm p-1.5 ${s.wrapper}`}>
+        <div className={`flex gap-2 bg-th-bg-card border border-th-border shadow-sm p-1.5 transition-all focus-within:border-th-solar/60 focus-within:shadow-[0_0_0_3px_rgb(var(--accent-solar)/0.12)] ${s.wrapper}`}>
           <input
             type="text"
             value={value}
@@ -57,17 +59,17 @@ export default function AddressSearch({
               if (error) setError("");
             }}
             placeholder={placeholder}
-            className={`flex-1 bg-transparent outline-none text-gray-900 placeholder-gray-400 ${s.input}`}
+            className={`flex-1 bg-transparent outline-none text-th-text placeholder:text-th-muted ${s.input}`}
             autoComplete="street-address"
           />
           <button
             type="submit"
-            className={`bg-amber-500 hover:bg-amber-600 text-white font-semibold rounded-lg transition-colors whitespace-nowrap ${s.button}`}
+            className={`btn-solar rounded-lg whitespace-nowrap ${s.button}`}
           >
             Analyze
           </button>
         </div>
-        {error && <p className="text-red-500 text-xs mt-1.5 pl-1">{error}</p>}
+        {error && <p className="text-xs mt-1.5 pl-1 text-th-danger">{error}</p>}
       </form>
     </div>
   );

@@ -11,12 +11,14 @@ from pydantic import BaseModel, Field
 from app.ai.orchestrator import get_suggested_questions, orchestrate
 from app.ai.summary_agent import generate_property_summary
 from app.core.cache import cache_get, cache_set, make_cache_key
+from app.core.circuit_breaker import ApiCircuitBreaker
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.main import limiter
+from app.core.limiter import limiter
 
 router = APIRouter()
 logger = get_logger(__name__)
+_ai_cb = ApiCircuitBreaker("anthropic", daily_limit=500)
 
 
 # ── Request / Response models ──────────────────────────────────────────────────
@@ -86,20 +88,24 @@ class SuggestedQuestionsRequest(BaseModel):
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
-@router.post("/summary", response_model=AISummaryOut)
-async def ai_summary(body: AISummaryRequest) -> AISummaryOut:
+@router.post(
+    "/summary",
+    responses={
+        503: {"description": "AI not configured or circuit breaker open"},
+        502: {"description": "Upstream AI generation failed"},
+    },
+)
+@limiter.limit(settings.RATE_LIMIT_AI_CHAT)
+async def ai_summary(request: Request, body: AISummaryRequest) -> AISummaryOut:
     """Generate a plain-English climate summary for a property using Claude AI.
 
     Cached for 6 hours. Requires ANTHROPIC_API_KEY.
     """
     if not settings.ANTHROPIC_API_KEY:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": "ai_not_configured",
-                "message": "ANTHROPIC_API_KEY not configured. Set it in your .env file.",
-            },
-        )
+        raise HTTPException(status_code=503, detail={"error": "ai_not_configured", "message": "ANTHROPIC_API_KEY not configured."})
+
+    if await _ai_cb.is_open():
+        raise HTTPException(status_code=503, detail={"error": "circuit_open", "message": "AI service temporarily unavailable. Try again shortly."})
 
     cache_key = make_cache_key("ai_summary", body.address.lower().replace(" ", "_")[:100])
     cached = await cache_get(cache_key)
@@ -115,19 +121,19 @@ async def ai_summary(body: AISummaryRequest) -> AISummaryOut:
 
     try:
         summary = await generate_property_summary(data)
+        await _ai_cb.record_success()
     except Exception as exc:
         logger.error("AI summary failed for %s: %s", body.address, exc)
-        raise HTTPException(
-            status_code=502,
-            detail={"error": "ai_error", "message": "AI generation failed. Please try again."},
-        )
+        await _ai_cb.record_failure()
+        raise HTTPException(status_code=502, detail={"error": "ai_error", "message": "AI generation failed. Please try again."})
 
     await cache_set(cache_key, {"summary": summary}, settings.CACHE_TTL_AI_SUMMARY)
     return AISummaryOut(address=body.address, summary=summary, cached=False)
 
 
 @router.post("/chat")
-async def ai_chat(body: ChatRequest):
+@limiter.limit(settings.RATE_LIMIT_AI_CHAT)
+async def ai_chat(request: Request, body: ChatRequest):
     """Multi-agent AI chat for property climate questions.
 
     Automatically routes to the best specialist agent (solar, weather, impact, prediction).

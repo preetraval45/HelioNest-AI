@@ -1,0 +1,23 @@
+# Local Windows dev override
+# Web app: http://localhost (port 80 via nginx — the ONLY external web port)
+# DB access: localhost:5433 (avoids conflict with native Windows PG on 5432)
+
+services:
+  postgres:
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: helionest
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-helionest}
+      POSTGRES_DB: helionest_dev
+
+  backend:
+    environment:
+      DATABASE_URL: postgresql+asyncpg://helionest:${POSTGRES_PASSWORD:-helionest}@postgres:5432/helionest_dev
+      REDIS_URL: redis://redis:6379/0
+
+  frontend:
+    build:
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost
+        NEXT_PUBLIC_MAPBOX_TOKEN: ${NEXT_PUBLIC_MAPBOX_TOKEN:-}

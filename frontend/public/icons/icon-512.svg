@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="80" fill="#0f172a"/>
+  <!-- Outer glow ring -->
+  <circle cx="256" cy="220" r="160" fill="none" stroke="#f59e0b" stroke-width="2" opacity="0.15"/>
+  <!-- Sun rays -->
+  <g transform="translate(256,220)" fill="#f59e0b" opacity="0.2">
+    <rect x="-6" y="-155" width="12" height="45" rx="6"/>
+    <rect x="-6" y="-155" width="12" height="40" rx="6" transform="rotate(45)"/>
+    <rect x="-6" y="-155" width="12" height="40" rx="6" transform="rotate(90)"/>
+    <rect x="-6" y="-155" width="12" height="40" rx="6" transform="rotate(135)"/>
+    <rect x="-6" y="-155" width="12" height="40" rx="6" transform="rotate(180)"/>
+    <rect x="-6" y="-155" width="12" height="40" rx="6" transform="rotate(225)"/>
+    <rect x="-6" y="-155" width="12" height="40" rx="6" transform="rotate(270)"/>
+    <rect x="-6" y="-155" width="12" height="40" rx="6" transform="rotate(315)"/>
+  </g>
+  <!-- Sun -->
+  <circle cx="256" cy="220" r="90" fill="#f59e0b"/>
+  <circle cx="256" cy="220" r="68" fill="#fbbf24"/>
+  <circle cx="256" cy="220" r="46" fill="#fde68a"/>
+  <!-- House -->
+  <path d="M 128 400 L 256 305 L 384 400 Z" fill="#1e293b"/>
+  <rect x="156" y="400" width="200" height="90" rx="8" fill="#1e293b"/>
+  <rect x="220" y="420" width="72" height="70" rx="4" fill="#0f172a" opacity="0.6"/>
+  <!-- Text -->
+  <text x="256" y="472" font-family="system-ui,sans-serif" font-size="32" font-weight="800" fill="#f59e0b" text-anchor="middle" letter-spacing="2">HELIONEST</text>
+</svg>

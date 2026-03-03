@@ -14,8 +14,8 @@ class Settings(BaseSettings):
     API_V1_PREFIX: str = "/api/v1"
     ALLOWED_ORIGINS: list[str] = ["http://localhost:3000"]
 
-    # Database
-    DATABASE_URL: str = "postgresql+asyncpg://helionest:helionest@localhost:5432/helionest_dev"
+    # Database — set DATABASE_URL in .env, do not hard-code credentials here
+    DATABASE_URL: str = "postgresql+asyncpg://helionest:CHANGE_ME@localhost:5432/helionest_dev"
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "change-me-in-production"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
     ALGORITHM: str = "HS256"
+
+    # Observability
+    SENTRY_DSN: str = ""
 
     # Rate limiting
     RATE_LIMIT_AI_CHAT: str = "20/minute"

@@ -1,0 +1,40 @@
+{
+  "name": "HelioNest AI",
+  "short_name": "HelioNest",
+  "description": "AI-Powered Property Climate Intelligence — solar, weather, moon & environmental insights for any U.S. address.",
+  "theme_color": "#f59e0b",
+  "background_color": "#0f172a",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "start_url": "/",
+  "scope": "/",
+  "lang": "en-US",
+  "categories": ["utilities", "weather", "lifestyle"],
+  "icons": [
+    {
+      "src": "/icons/icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "screenshots": [],
+  "shortcuts": [
+    {
+      "name": "Search Address",
+      "url": "/",
+      "description": "Look up a U.S. property"
+    },
+    {
+      "name": "Dashboard",
+      "url": "/dashboard",
+      "description": "Your saved properties"
+    }
+  ]
+}

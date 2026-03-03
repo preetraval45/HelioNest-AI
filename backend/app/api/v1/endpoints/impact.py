@@ -161,3 +161,93 @@ async def annual_summary(
 
     await cache_set(cache_key, result, ttl=CACHE_TTL_ANNUAL)
     return result
+
+
+# ── Mold & Air Quality ──────────────────────────────────────────────────────────
+
+from pydantic import BaseModel
+from app.engines.mold_engine import MoldRisk, calculate_mold_risk
+from app.services.openaq_service import AirQualityResult, PollutantReading, get_air_quality
+from app.services.weather_service import get_current_weather
+
+
+class MoldRiskOut(BaseModel):
+    mold_index: float
+    risk_level: str
+    risk_color: str
+    contributing_factors: list[str]
+    recommendations: list[str]
+
+
+class PollutantOut(BaseModel):
+    parameter: str
+    value: float
+    unit: str
+    last_updated: str | None = None
+
+
+class AirQualityOut(BaseModel):
+    station_name: str | None = None
+    distance_km: float | None = None
+    aqi: int | None = None
+    aqi_category: str | None = None
+    aqi_color: str | None = None
+    pollutants: list[PollutantOut]
+    source: str
+
+
+@router.get("/mold-risk")
+async def mold_risk(
+    lat: float = Query(..., description="Latitude (decimal degrees)"),
+    lon: float = Query(..., description="Longitude (decimal degrees)"),
+) -> MoldRiskOut:
+    """Compute mold growth risk index from current weather conditions."""
+    try:
+        weather = await get_current_weather(lat, lon)
+        risk = calculate_mold_risk(
+            temp_c=weather.temp_c,
+            humidity_pct=weather.humidity_pct,
+            dew_point_c=getattr(weather, "dew_point_c", None),
+        )
+    except Exception as exc:
+        logger.error("Mold risk calculation error: %s", exc)
+        raise HTTPException(status_code=502, detail="Weather data unavailable for mold risk") from exc
+
+    return MoldRiskOut(
+        mold_index=risk.mold_index,
+        risk_level=risk.risk_level,
+        risk_color=risk.risk_color,
+        contributing_factors=risk.contributing_factors,
+        recommendations=risk.recommendations,
+    )
+
+
+@router.get("/air-quality")
+async def air_quality(
+    lat: float = Query(..., description="Latitude (decimal degrees)"),
+    lon: float = Query(..., description="Longitude (decimal degrees)"),
+) -> AirQualityOut:
+    """Fetch nearest OpenAQ air quality data — PM2.5 AQI and pollutant breakdown."""
+    try:
+        result = await get_air_quality(lat, lon)
+    except Exception as exc:
+        logger.error("Air quality fetch error: %s", exc)
+        raise HTTPException(status_code=502, detail="Air quality data unavailable") from exc
+
+    return AirQualityOut(
+        station_name=result.station_name,
+        distance_km=result.distance_km,
+        aqi=result.aqi,
+        aqi_category=result.aqi_category,
+        aqi_color=result.aqi_color,
+        pollutants=[
+            PollutantOut(
+                parameter=p.parameter,
+                value=p.value,
+                unit=p.unit,
+                last_updated=p.last_updated,
+            )
+            for p in result.pollutants
+        ],
+        source=result.source,
+    )

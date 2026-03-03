@@ -40,6 +40,13 @@ _PREDICTION_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 
+_CLIMATE_KEYWORDS = re.compile(
+    r"\b(historical|history|10.?year|decade|warming|cooling|trend|"
+    r"climate risk|climate forecast|past data|temperature rise|precipitation change|"
+    r"extreme event|heatwave|drought|flood risk|storm surge)\b",
+    re.IGNORECASE,
+)
+
 
 def _detect_intent(question: str) -> str:
     """Return the best agent to handle this question."""
@@ -48,6 +55,7 @@ def _detect_intent(question: str) -> str:
         "weather": len(_WEATHER_KEYWORDS.findall(question)),
         "impact": len(_IMPACT_KEYWORDS.findall(question)),
         "prediction": len(_PREDICTION_KEYWORDS.findall(question)),
+        "climate": len(_CLIMATE_KEYWORDS.findall(question)),
     }
     best = max(scores, key=scores.get)  # type: ignore[arg-type]
     return best if scores[best] > 0 else "general"
@@ -108,6 +116,9 @@ async def orchestrate(
         elif intent == "prediction":
             from app.ai.agents.prediction_agent import prediction_agent_respond
             answer = await prediction_agent_respond(question, property_data)
+        elif intent == "climate":
+            from app.ai.agents.climate_agent import climate_agent_respond
+            answer = await climate_agent_respond(question, property_data)
         else:
             answer = await _general_respond(question, property_data)
 

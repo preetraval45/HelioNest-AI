@@ -1,20 +1,28 @@
 # ── Stage 1: install deps ──────────────────────────────────────────────────────
-FROM node:20-alpine AS deps
+FROM node:22-alpine AS deps
 WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN npm ci --only=production
+COPY package.json package-lock.json ./
+RUN npm ci --legacy-peer-deps
 
 # ── Stage 2: build ────────────────────────────────────────────────────────────
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN npm ci
+COPY package.json package-lock.json ./
+RUN npm ci --legacy-peer-deps && \
+    printf '// stub\n' > node_modules/@types/mapbox__point-geometry/index.d.ts
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
+
+# These are baked into the browser bundle at build time
+ARG NEXT_PUBLIC_API_URL=http://localhost
+ARG NEXT_PUBLIC_MAPBOX_TOKEN=
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_MAPBOX_TOKEN=$NEXT_PUBLIC_MAPBOX_TOKEN
+
 RUN npm run build
 
 # ── Stage 3: production runner ────────────────────────────────────────────────
-FROM node:20-alpine AS runner
+FROM node:22-alpine AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production

@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   # ── PostgreSQL + PostGIS ────────────────────────────────────────────────────
   postgres:
@@ -8,10 +6,8 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: helionest
-      POSTGRES_PASSWORD: helionest
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: helionest_dev
-    ports:
-      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -25,8 +21,6 @@ services:
     image: redis:7-alpine
     container_name: helionest-redis
     restart: unless-stopped
-    ports:
-      - "6379:6379"
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
@@ -44,12 +38,10 @@ services:
     container_name: helionest-backend
     restart: unless-stopped
     env_file:
-      - .env.example
+      - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://helionest:helionest@postgres:5432/helionest_dev
+      DATABASE_URL: postgresql+asyncpg://helionest:${POSTGRES_PASSWORD}@postgres:5432/helionest_dev
       REDIS_URL: redis://redis:6379/0
-    ports:
-      - "8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -68,14 +60,10 @@ services:
       dockerfile: Dockerfile
     container_name: helionest-frontend
     restart: unless-stopped
-    environment:
-      NEXT_PUBLIC_API_URL: http://backend:8000
-    ports:
-      - "3000:3000"
     depends_on:
       - backend
 
-  # ── Nginx (reverse proxy) ───────────────────────────────────────────────────
+  # ── Nginx — single entry point on port 80 ──────────────────────────────────
   nginx:
     image: nginx:alpine
     container_name: helionest-nginx

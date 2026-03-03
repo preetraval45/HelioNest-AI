@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192">
+  <rect width="192" height="192" rx="32" fill="#0f172a"/>
+  <!-- Sun rays -->
+  <g transform="translate(96,96)" fill="#f59e0b" opacity="0.25">
+    <rect x="-4" y="-80" width="8" height="30" rx="4"/>
+    <rect x="-4" y="50" width="8" height="30" rx="4" transform="rotate(180)"/>
+    <rect x="-80" y="-4" width="30" height="8" rx="4"/>
+    <rect x="50" y="-4" width="30" height="8" rx="4"/>
+    <rect x="-4" y="-80" width="8" height="24" rx="4" transform="rotate(45)"/>
+    <rect x="-4" y="-80" width="8" height="24" rx="4" transform="rotate(90)"/>
+    <rect x="-4" y="-80" width="8" height="24" rx="4" transform="rotate(135)"/>
+    <rect x="-4" y="-80" width="8" height="24" rx="4" transform="rotate(225)"/>
+    <rect x="-4" y="-80" width="8" height="24" rx="4" transform="rotate(270)"/>
+    <rect x="-4" y="-80" width="8" height="24" rx="4" transform="rotate(315)"/>
+  </g>
+  <!-- Sun circle -->
+  <circle cx="96" cy="96" r="38" fill="#f59e0b"/>
+  <circle cx="96" cy="96" r="28" fill="#fbbf24"/>
+  <!-- Nest / house silhouette at bottom -->
+  <path d="M 56 148 L 96 118 L 136 148 Z" fill="#1e293b" opacity="0.8"/>
+  <rect x="68" y="148" width="56" height="28" rx="4" fill="#1e293b" opacity="0.8"/>
+  <!-- H letter hint -->
+  <text x="96" y="100" font-family="sans-serif" font-size="28" font-weight="900" fill="#fff8" text-anchor="middle" dominant-baseline="middle" opacity="0.0">H</text>
+</svg>

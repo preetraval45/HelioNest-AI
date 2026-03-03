@@ -1,14 +1,16 @@
-"""Weather endpoints — current, forecast, and monthly averages."""
+"""Weather endpoints — current, forecast, monthly averages, and 10-year climate trends."""
 
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from app.core.logging import get_logger
 from app.engines.weather_engine import EnrichedWeather, enrich_weather, score_monthly_comfort
+from app.services.climate_service import YearlyTrend, get_historical_climate
 from app.services.weather_service import ForecastDay, MonthlyAverage, get_current_weather, get_forecast, get_monthly_averages
 
 router = APIRouter()
@@ -179,3 +181,71 @@ async def monthly_averages(
     ]
 
     return MonthlyAveragesOut(months=months_out, source="open-meteo-historical")
+
+
+# ── Climate models ──────────────────────────────────────────────────────────────
+
+class YearlyTrendOut(BaseModel):
+    year: int
+    avg_temp_c: float
+    total_precip_mm: float
+    max_wind_kmh: float
+
+
+class HistoricalClimateOut(BaseModel):
+    lat: float
+    lon: float
+    years: int
+    yearly: list[YearlyTrendOut]
+    temp_trend_per_decade: float
+    precip_trend_pct_per_decade: float
+    wind_trend_per_decade: float
+    hottest_year: int
+    coldest_year: int
+    wettest_year: int
+    driest_year: int
+    monthly_avg_temp_c: list[float]
+
+
+# ── Climate endpoint ────────────────────────────────────────────────────────────
+
+@router.get("/climate", response_model=HistoricalClimateOut)
+async def weather_climate(
+    lat: float = Query(..., description="Latitude (decimal degrees)"),
+    lon: float = Query(..., description="Longitude (decimal degrees)"),
+    years: int = Query(10, ge=3, le=20, description="Number of historical years to analyse"),
+) -> HistoricalClimateOut:
+    """10-year historical climate trends — temperature, precipitation, wind; linear trend slopes."""
+    if not (-90 <= lat <= 90):
+        raise HTTPException(status_code=422, detail="lat must be between -90 and 90")
+    if not (-180 <= lon <= 180):
+        raise HTTPException(status_code=422, detail="lon must be between -180 and 180")
+
+    try:
+        climate = await get_historical_climate(lat, lon, years=years)
+    except Exception as exc:
+        logger.error("Climate service error: %s", exc)
+        raise HTTPException(status_code=502, detail="Climate data service unavailable") from exc
+
+    return HistoricalClimateOut(
+        lat=climate.lat,
+        lon=climate.lon,
+        years=climate.years,
+        yearly=[
+            YearlyTrendOut(
+                year=t.year,
+                avg_temp_c=t.avg_temp_c,
+                total_precip_mm=t.total_precip_mm,
+                max_wind_kmh=t.max_wind_kmh,
+            )
+            for t in climate.yearly
+        ],
+        temp_trend_per_decade=climate.temp_trend_per_decade,
+        precip_trend_pct_per_decade=climate.precip_trend_pct_per_decade,
+        wind_trend_per_decade=climate.wind_trend_per_decade,
+        hottest_year=climate.hottest_year,
+        coldest_year=climate.coldest_year,
+        wettest_year=climate.wettest_year,
+        driest_year=climate.driest_year,
+        monthly_avg_temp_c=climate.monthly_avg_temp_c,
+    )

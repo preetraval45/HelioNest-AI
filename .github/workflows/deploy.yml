@@ -175,6 +175,9 @@ jobs:
             --from-literal=NREL_API_KEY="${{ secrets.NREL_API_KEY }}" \
             --from-literal=MAPBOX_TOKEN="${{ secrets.MAPBOX_TOKEN }}" \
             --from-literal=NEXT_PUBLIC_MAPBOX_TOKEN="${{ secrets.MAPBOX_TOKEN }}" \
+            --from-literal=SENTRY_DSN="${{ secrets.SENTRY_DSN }}" \
+            --from-literal=NEXT_PUBLIC_SENTRY_DSN="${{ secrets.SENTRY_DSN }}" \
+            --from-literal=NEXT_PUBLIC_POSTHOG_KEY="${{ secrets.POSTHOG_KEY }}" \
             --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Deploy with Kustomize

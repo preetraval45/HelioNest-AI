@@ -104,11 +104,12 @@ export default function SunPathChart({
     // Current sun position marker
     if (currentElevation !== undefined && currentAzimuth !== undefined) {
       // Find closest data point
-      const closest = data.reduce((prev, curr, i) => {
+      type Indexed = SunPathPoint & { idx: number };
+      const closest = data.reduce<Indexed>((prev, curr, i) => {
         const prevDelta = Math.abs(prev.azimuth_deg - currentAzimuth);
         const currDelta = Math.abs(curr.azimuth_deg - currentAzimuth);
         return currDelta < prevDelta ? { ...curr, idx: i } : prev;
-      }, { ...data[0], idx: 0 } as SunPathPoint & { idx: number });
+      }, { ...data[0], idx: 0 });
 
       const cx = xScale(closest.idx ?? 0);
       const cy = yScale(currentElevation);

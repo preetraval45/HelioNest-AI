@@ -4,6 +4,8 @@ import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { Navbar } from "@/components/Navbar";
 
+const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
+
 export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
@@ -21,10 +23,26 @@ export default function LoginPage() {
     }
 
     setLoading(true);
-    // Auth endpoint wired in Phase 2 (Task 2.7)
-    await new Promise((r) => setTimeout(r, 800));
-    setLoading(false);
-    setError("Authentication not yet available — coming in Phase 2.");
+    try {
+      const res = await fetch(`${API}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      const data: { access_token?: string; detail?: string } = await res.json();
+      if (!res.ok) {
+        setError(typeof data.detail === "string" ? data.detail : "Login failed. Please check your credentials.");
+        return;
+      }
+      if (data.access_token) {
+        localStorage.setItem("hn_token", data.access_token);
+        router.push("/dashboard");
+      }
+    } catch {
+      setError("Could not connect to server. Make sure the backend is running.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (
@@ -37,7 +55,6 @@ export default function LoginPage() {
         <div className="absolute bottom-1/3 right-1/4 w-64 h-64 rounded-full bg-th-moon/5 blur-3xl" />
       </div>
 
-      {/* Form */}
       <div className="flex-1 flex items-center justify-center px-4 py-12 relative z-10">
         <div className="w-full max-w-md">
           <div className="glass-card rounded-3xl p-8">
@@ -48,13 +65,6 @@ export default function LoginPage() {
               </div>
               <h1 className="text-2xl font-bold text-th-text">Welcome back</h1>
               <p className="text-th-text-2 text-sm mt-1">Sign in to access your saved properties</p>
-            </div>
-
-            {/* Coming Soon Banner */}
-            <div className="mb-6 px-4 py-3 bg-th-solar/10 border border-th-solar/20 rounded-xl text-center">
-              <p className="text-th-solar text-xs font-medium">
-                Authentication coming in Phase 2 — you can still analyze addresses without an account
-              </p>
             </div>
 
             <form onSubmit={handleSubmit} className="flex flex-col gap-4">

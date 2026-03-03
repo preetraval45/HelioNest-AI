@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Annotated
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from geoalchemy2.shape import from_shape
 from shapely.geometry import Point
 from sqlalchemy import select
@@ -13,15 +15,22 @@ from app.core.logging import get_logger
 from app.models.location import Location
 from app.schemas.location import GeocodeRequest, LocationOut
 from app.services.geocoding import GeocodingError, geocode_address
+from app.core.limiter import limiter
 
 router = APIRouter()
 logger = get_logger(__name__)
 
+DbSession = Annotated[AsyncSession, Depends(get_db)]
 
-@router.post("/geocode", response_model=LocationOut)
+
+@router.post(
+    "/geocode",
+    responses={422: {"description": "Address could not be resolved to a U.S. location"}},
+)
 async def geocode(
-    body: GeocodeRequest,
-    db: AsyncSession = Depends(get_db),
+    request: Request,
+    body: Annotated[GeocodeRequest, Body()],
+    db: DbSession,
 ) -> LocationOut:
     """Geocode a U.S. address and persist it to the database.
 

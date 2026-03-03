@@ -197,6 +197,12 @@
   }
 }
 
+/* ── Chart helpers ───────────────────────────────────────────────────────────── */
+
+.heatmap-legend-gradient {
+  background: linear-gradient(to right, hsl(120, 60%, 45%), hsl(60, 65%, 45%), hsl(0, 65%, 45%));
+}
+
 /* ── Utilities ──────────────────────────────────────────────────────────────── */
 
 @layer utilities {
