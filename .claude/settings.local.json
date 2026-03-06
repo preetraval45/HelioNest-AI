@@ -78,7 +78,29 @@
       "Bash(curl -s -A \"HelioNest-AI/1.0 contact:helionest-app@proton.me\" \"https://nominatim.openstreetmap.org/search?q=Tundra+Swan+Dr,+Indian+Trail,+NC&format=jsonv2&limit=3&countrycodes=us&addressdetails=1\")",
       "Bash(curl -s -X POST http://localhost/api/v1/address/geocode -H \"Content-Type: application/json\" -d '{\"\"address\"\": \"\"600 S College St, Charlotte, NC 28202\"\"}')",
       "Bash(docker compose build backend frontend)",
-      "Bash(docker compose up -d backend frontend)"
+      "Bash(docker compose up -d backend frontend)",
+      "Bash(docker compose build backend)",
+      "Bash(docker compose up -d backend)",
+      "Bash(curl -sf http://localhost/api/v1/health)",
+      "Bash(curl -s -X POST http://localhost/api/v1/address/geocode -H \"Content-Type: application/json\" -d '{\"\"address\"\": \"\"45 Rockefeller Plaza, New York, NY 10111\"\"}')",
+      "Bash(python3 -c \":*)",
+      "Bash(docker compose up -d)",
+      "Bash(curl -sI http://localhost/)",
+      "Bash(curl -s \"http://localhost/api/v1/address/reverse-geocode?lat=35.2271&lon=-80.8431\")",
+      "Bash(docker compose build --no-cache frontend backend)",
+      "Bash(docker compose build --no-cache frontend)",
+      "Bash(docker compose up -d --force-recreate frontend nginx)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\" http://localhost:3000/)",
+      "Bash(curl -s \"http://localhost:3000/api/v1/health\")",
+      "Bash(curl -s -X POST \"http://localhost:3000/api/v1/address/geocode\" -H \"Content-Type: application/json\" -d '{\"\"address\"\": \"\"1600 Pennsylvania Ave NW, Washington DC 20500\"\"}')",
+      "Bash(docker compose up -d --force-recreate frontend)",
+      "Bash(curl -s -X POST \"http://localhost:3000/api/v1/address/geocode\" -H \"Content-Type: application/json\" -d '{\"\"address\"\": \"\"123 Main St, Charlotte, NC 28201\"\"}')",
+      "Bash(docker exec helionest-frontend grep -r \"localhost:3000\" /app/.next/static/chunks/)",
+      "Bash(docker exec helionest-frontend grep -rl \"localhost:3000\" /app/.next/)",
+      "Bash(docker exec helionest-frontend sh -c \"grep -r ''localhost'' /app/.next/static/chunks/ 2>/dev/null | grep -o ''localhost[^\"\"]*'' | head -5\")",
+      "Bash(npx tsc --noEmit --pretty)",
+      "Bash(docker compose up -d frontend)",
+      "Bash(docker compose up -d nginx)"
     ]
   }
 }

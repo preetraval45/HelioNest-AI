@@ -14,7 +14,7 @@ from app.core.database import get_db
 from app.core.logging import get_logger
 from app.models.location import Location
 from app.schemas.location import GeocodeRequest, LocationOut
-from app.services.geocoding import GeocodingError, geocode_address
+from app.services.geocoding import GeocodingError, geocode_address, reverse_geocode
 from app.core.limiter import limiter
 
 router = APIRouter()
@@ -83,4 +83,47 @@ async def geocode(
     await db.refresh(location)
 
     logger.info("Saved new location id=%d: %s", location.id, geo.formatted_address)
+    return LocationOut.model_validate(location)
+
+@router.get("/reverse-geocode")
+async def reverse_geocode_endpoint(
+    lat: float,
+    lon: float,
+    db: DbSession,
+) -> LocationOut:
+    """Convert GPS coordinates to a US street address and persist to DB."""
+    try:
+        geo = await reverse_geocode(lat, lon)
+    except GeocodingError:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "reverse_geocoding_failed",
+                "message": f"Could not resolve location ({lat:.5f}, {lon:.5f}). Are you in the US?",
+            },
+        )
+
+    # Dedup
+    stmt = select(Location).where(Location.formatted_address == geo.formatted_address)
+    result = await db.execute(stmt)
+    existing = result.scalar_one_or_none()
+    if existing:
+        return LocationOut.model_validate(existing)
+
+    geom_point = from_shape(Point(geo.lon, geo.lat), srid=4326)
+    location = Location(
+        address=geo.formatted_address,
+        formatted_address=geo.formatted_address,
+        lat=geo.lat,
+        lon=geo.lon,
+        city=geo.city,
+        state=geo.state,
+        zip=geo.zip,
+        geom=geom_point,
+    )
+    db.add(location)
+    await db.commit()
+    await db.refresh(location)
+
+    logger.info("Saved reverse-geocoded location id=%d: %s", location.id, geo.formatted_address)
     return LocationOut.model_validate(location)

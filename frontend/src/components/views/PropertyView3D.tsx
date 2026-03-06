@@ -1,437 +1,503 @@
 "use client";
 
-import { useRef, useState, useEffect, Suspense, useMemo } from "react";
-import { Canvas, useThree } from "@react-three/fiber";
-import { OrbitControls, Sky, Environment, Html } from "@react-three/drei";
+import { useRef, useEffect, useState, useCallback } from "react";
 import * as THREE from "three";
 
-// ── Sun position helpers ──────────────────────────────────────────────────────
+// ── Constants ─────────────────────────────────────────────────────────────────
 
-function degToRad(deg: number): number {
-  return (deg * Math.PI) / 180;
+const ZOOM          = 18;            // ESRI tile zoom (≈155m per tile at mid-lat)
+const TILE_PX       = 256;           // pixels per tile
+const GRID          = 3;             // 3×3 tile grid (9 tiles total)
+const GROUND_SIZE   = 60;            // Three.js scene units for the ground plane
+const SCENE_SCALE   = 0.10;          // 1m → 0.10 scene units  (so 600m → 60 units)
+const BUILD_H_MULT  = 3.5;           // exaggerate building heights for visibility
+const ORBIT_R       = 22;
+const METERS_PER_DEG_LAT = 111_320;
+
+const API = `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost"}/api/v1`;
+
+const MONTH_NAMES   = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+// ── Tile helpers ──────────────────────────────────────────────────────────────
+
+function latLonToTileXY(lat: number, lon: number, z: number) {
+  const n   = Math.pow(2, z);
+  const tileX = Math.floor(((lon + 180) / 360) * n);
+  const latR  = (lat * Math.PI) / 180;
+  const tileY = Math.floor(
+    ((1 - Math.log(Math.tan(latR) + 1 / Math.cos(latR)) / Math.PI) / 2) * n
+  );
+  return { tileX, tileY };
 }
 
-/** Convert solar azimuth (degrees from North clockwise) + elevation → Three.js direction */
-function sunDirection(azimuthDeg: number, elevationDeg: number): THREE.Vector3 {
-  const az = degToRad(azimuthDeg);
-  const el = degToRad(elevationDeg);
-  // Three.js: +X = East, +Y = Up, +Z = South
-  const x = Math.sin(az) * Math.cos(el);
-  const y = Math.sin(el);
-  const z = Math.cos(az) * Math.cos(el);
-  return new THREE.Vector3(x, y, z).normalize();
+/** Load a 3×3 grid of ESRI World Imagery tiles and stitch into a CanvasTexture */
+async function buildSatelliteTexture(lat: number, lon: number): Promise<THREE.CanvasTexture | null> {
+  try {
+    const { tileX: cx, tileY: cy } = latLonToTileXY(lat, lon, ZOOM);
+    const half   = Math.floor(GRID / 2);
+    const canvas = document.createElement("canvas");
+    canvas.width  = TILE_PX * GRID;
+    canvas.height = TILE_PX * GRID;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+
+    await Promise.all(
+      Array.from({ length: GRID * GRID }, (_, i) => {
+        const dy = Math.floor(i / GRID) - half;
+        const dx = (i % GRID) - half;
+        return new Promise<void>((resolve) => {
+          const img = new Image();
+          img.crossOrigin = "anonymous";
+          img.onload  = () => {
+            ctx.drawImage(img, (dx + half) * TILE_PX, (dy + half) * TILE_PX, TILE_PX, TILE_PX);
+            resolve();
+          };
+          img.onerror = () => resolve();
+          // ESRI uses {z}/{y}/{x} order
+          img.src = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${ZOOM}/${cy + dy}/${cx + dx}`;
+        });
+      })
+    );
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.needsUpdate = true;
+    return tex;
+  } catch {
+    return null;
+  }
 }
 
-/**
- * Approximate solar azimuth + elevation for a given latitude and hour of day.
- * Uses a simple declination estimate for the selected date scenario.
- */
-function computeSunPosition(
-  lat: number,
-  hourOfDay: number,
-  dateModeDeclinationDeg: number
-): { azimuth: number; elevation: number } {
-  const latRad = degToRad(lat);
-  const decRad = degToRad(dateModeDeclinationDeg);
-  // Hour angle: solar noon = 0
-  const hourAngleRad = degToRad((hourOfDay - 12) * 15);
+// ── Geo → scene coordinate conversion ────────────────────────────────────────
 
-  const sinAlt =
-    Math.sin(latRad) * Math.sin(decRad) +
-    Math.cos(latRad) * Math.cos(decRad) * Math.cos(hourAngleRad);
-  const elevationRad = Math.asin(Math.max(-1, Math.min(1, sinAlt)));
-
-  const cosAz =
-    (Math.sin(decRad) - Math.sin(latRad) * sinAlt) /
-    (Math.cos(latRad) * Math.cos(elevationRad) + 1e-9);
-  let azimuthDeg = (Math.acos(Math.max(-1, Math.min(1, cosAz))) * 180) / Math.PI;
-  if (Math.sin(hourAngleRad) > 0) azimuthDeg = 360 - azimuthDeg;
-
-  return {
-    azimuth: azimuthDeg,
-    elevation: (elevationRad * 180) / Math.PI,
-  };
+function geoToScene(lat0: number, lon0: number, lat: number, lon: number): [number, number] {
+  const mPerDegLon = METERS_PER_DEG_LAT * Math.cos((lat0 * Math.PI) / 180);
+  const x = (lon - lon0) * mPerDegLon * SCENE_SCALE;
+  const z = -(lat - lat0) * METERS_PER_DEG_LAT * SCENE_SCALE;
+  return [x, z];
 }
 
-// ── Facade heat colors ────────────────────────────────────────────────────────
+// ── Sun / date helpers ────────────────────────────────────────────────────────
 
-const FACADE_COLORS: Record<string, string> = {
-  N: "#60a5fa", // cool blue
-  S: "#f59e0b", // warm amber
-  E: "#fbbf24", // warm-light
-  W: "#fcd34d", // warm-light
+function getDayOfYear(m: number, d: number): number {
+  let doy = d;
+  for (let i = 1; i < m; i++) doy += DAYS_IN_MONTH[i - 1];
+  return Math.min(doy, 365);
+}
+function doyToDeclination(doy: number) {
+  return 23.45 * Math.sin((2 * Math.PI / 365) * (doy - 81));
+}
+function computeSunPosition(lat: number, hour: number, decDeg: number) {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const latR  = toRad(lat), decR = toRad(decDeg);
+  const haR   = toRad((hour - 12) * 15);
+  const sinAlt = Math.sin(latR) * Math.sin(decR) + Math.cos(latR) * Math.cos(decR) * Math.cos(haR);
+  const elR  = Math.asin(Math.max(-1, Math.min(1, sinAlt)));
+  const cosAz = (Math.sin(decR) - Math.sin(latR) * sinAlt) / (Math.cos(latR) * Math.cos(elR) + 1e-9);
+  let az = (Math.acos(Math.max(-1, Math.min(1, cosAz))) * 180) / Math.PI;
+  if (Math.sin(haR) > 0) az = 360 - az;
+  return { azimuth: az, elevation: (elR * 180) / Math.PI };
+}
+
+// ── GeoJSON building → Three.js BoxGeometry ───────────────────────────────────
+
+interface GeoFeature {
+  geometry?: { coordinates?: number[][][] };
+  properties?: { height?: number; building?: string };
+}
+
+function featureToMesh(f: GeoFeature, lat0: number, lon0: number): THREE.Mesh | null {
+  const ring = f.geometry?.coordinates?.[0];
+  if (!ring || ring.length < 3) return null;
+
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const c of ring) {
+    if (c.length < 2) continue;
+    const [x, z] = geoToScene(lat0, lon0, c[1], c[0]);
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+  }
+  const w = Math.max(0.3, maxX - minX);
+  const d = Math.max(0.3, maxZ - minZ);
+  const cx = (minX + maxX) / 2;
+  const cz = (minZ + maxZ) / 2;
+  const hM = typeof f.properties?.height === "number" ? f.properties.height : 8;
+  const h  = Math.max(0.4, hM * SCENE_SCALE * BUILD_H_MULT);
+
+  const geo  = new THREE.BoxGeometry(w, h, d);
+  const mesh = new THREE.Mesh(
+    geo,
+    new THREE.MeshLambertMaterial({ color: 0x94a3b8 })
+  );
+  mesh.position.set(cx, h / 2, cz);
+  mesh.castShadow    = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+// ── Camera presets ─────────────────────────────────────────────────────────────
+
+type CamPreset = "iso" | "bird" | "street";
+const CAM_PRESETS: Record<CamPreset, { t: number; p: number }> = {
+  iso:    { t: Math.PI * 0.75, p: Math.PI / 3.5  },
+  bird:   { t: Math.PI * 0.75, p: 0.12            },
+  street: { t: Math.PI * 0.75, p: Math.PI / 2.1  },
+};
+const CAM_LABELS: Record<CamPreset, string> = {
+  iso:    "3D View",
+  bird:   "Bird's Eye",
+  street: "Street Level",
 };
 
-// ── House mesh ────────────────────────────────────────────────────────────────
+// ── Component ─────────────────────────────────────────────────────────────────
 
-interface HouseProps {
-  sunDir: THREE.Vector3;
-}
+interface PropertyView3DProps { lat: number; lon: number }
 
-function House({ sunDir }: HouseProps) {
-  const lightRef = useRef<THREE.DirectionalLight>(null);
+export default function PropertyView3D({ lat, lon }: PropertyView3DProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const canvasRef    = useRef<HTMLCanvasElement>(null);
 
-  useEffect(() => {
-    if (!lightRef.current) return;
-    const dist = 18;
-    lightRef.current.position.set(
-      sunDir.x * dist,
-      Math.max(sunDir.y * dist, 0.5),
-      sunDir.z * dist
+  const sceneRef = useRef<{
+    renderer: THREE.WebGLRenderer;
+    camera:   THREE.PerspectiveCamera;
+    scene:    THREE.Scene;
+    sunLight: THREE.DirectionalLight;
+    ground:   THREE.Mesh;
+    animId:   number;
+  } | null>(null);
+
+  const now = new Date();
+  const [month,     setMonth]     = useState(now.getMonth() + 1);
+  const [day,       setDay]       = useState(now.getDate());
+  const [hourOfDay, setHourOfDay] = useState(12);
+  const [camPreset, setCamPreset] = useState<CamPreset>("iso");
+  const [error,     setError]     = useState("");
+  const [loading,   setLoading]   = useState(true);
+  const [tileMsg,   setTileMsg]   = useState("Loading satellite imagery…");
+
+  const theta      = useRef(Math.PI * 0.75);
+  const phi        = useRef(Math.PI / 3.5);
+  const isDragging = useRef(false);
+  const lastMouse  = useRef({ x: 0, y: 0 });
+
+  const decl  = doyToDeclination(getDayOfYear(month, day));
+  const { azimuth: sunAz, elevation: sunEl } = computeSunPosition(lat, hourOfDay, decl);
+
+  // Update sun light + sky colour
+  const updateSun = useCallback((az: number, el: number) => {
+    const r = sceneRef.current;
+    if (!r) return;
+    const toRad = (d: number) => (d * Math.PI) / 180;
+    const dist = 40;
+    r.sunLight.position.set(
+      Math.sin(toRad(az)) * Math.cos(toRad(el)) * dist,
+      Math.max(Math.sin(toRad(el)) * dist, 0.5),
+      Math.cos(toRad(az)) * Math.cos(toRad(el)) * dist,
     );
-    lightRef.current.target.position.set(0, 0, 0);
-    lightRef.current.target.updateMatrixWorld();
-  }, [sunDir]);
+    r.sunLight.target.position.set(0, 0, 0);
+    r.sunLight.target.updateMatrixWorld();
+    r.sunLight.intensity = el > 0 ? 1.8 : 0.1;
 
-  // Roof geometry — isoceles triangle prism
-  const roofShape = useMemo(() => {
-    const shape = new THREE.Shape();
-    shape.moveTo(-2.2, 0);
-    shape.lineTo(0, 1.5);
-    shape.lineTo(2.2, 0);
-    shape.closePath();
-    return shape;
+    r.scene.background = el > 10
+      ? new THREE.Color(0.15, 0.45, 0.90)
+      : el > 0
+      ? new THREE.Color(0.50, 0.30, 0.12)
+      : new THREE.Color(0.01, 0.01, 0.06);
   }, []);
 
-  const extrudeSettings = useMemo<THREE.ExtrudeGeometryOptions>(
-    () => ({ depth: 4.4, bevelEnabled: false }),
-    []
-  );
+  useEffect(() => { updateSun(sunAz, sunEl); }, [sunAz, sunEl, updateSun]);
 
-  return (
-    <group>
-      {/* Directional sun light */}
-      <directionalLight
-        ref={lightRef}
-        intensity={1.6}
-        color="#fff8e1"
-        castShadow
-        shadow-mapSize-width={2048}
-        shadow-mapSize-height={2048}
-        shadow-camera-near={0.5}
-        shadow-camera-far={60}
-        shadow-camera-left={-15}
-        shadow-camera-right={15}
-        shadow-camera-top={15}
-        shadow-camera-bottom={-15}
-        shadow-bias={-0.0005}
-      />
+  // Build Three.js scene + load async data
+  const initScene = useCallback(async () => {
+    const canvas    = canvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
 
-      {/* Ambient fill */}
-      <ambientLight intensity={0.35} color="#b0c4de" />
+    const w = container.offsetWidth || 800;
+    const h = 480;
 
-      {/* Ground plane */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
-        <planeGeometry args={[20, 20]} />
-        <meshLambertMaterial color="#3a5a40" />
-      </mesh>
-
-      {/* -- House body walls -- */}
-      {/* North face (Z = -2) */}
-      <mesh position={[0, 1.25, -2.01]} castShadow receiveShadow>
-        <planeGeometry args={[4, 2.5]} />
-        <meshLambertMaterial color={FACADE_COLORS.N} side={THREE.FrontSide} />
-      </mesh>
-
-      {/* South face (Z = +2) */}
-      <mesh
-        position={[0, 1.25, 2.01]}
-        rotation={[0, Math.PI, 0]}
-        castShadow
-        receiveShadow
-      >
-        <planeGeometry args={[4, 2.5]} />
-        <meshLambertMaterial color={FACADE_COLORS.S} side={THREE.FrontSide} />
-      </mesh>
-
-      {/* East face (X = +2) */}
-      <mesh
-        position={[2.01, 1.25, 0]}
-        rotation={[0, -Math.PI / 2, 0]}
-        castShadow
-        receiveShadow
-      >
-        <planeGeometry args={[4, 2.5]} />
-        <meshLambertMaterial color={FACADE_COLORS.E} side={THREE.FrontSide} />
-      </mesh>
-
-      {/* West face (X = -2) */}
-      <mesh
-        position={[-2.01, 1.25, 0]}
-        rotation={[0, Math.PI / 2, 0]}
-        castShadow
-        receiveShadow
-      >
-        <planeGeometry args={[4, 2.5]} />
-        <meshLambertMaterial color={FACADE_COLORS.W} side={THREE.FrontSide} />
-      </mesh>
-
-      {/* Main box body (interior volume for shadow casting) */}
-      <mesh position={[0, 1.25, 0]} castShadow receiveShadow>
-        <boxGeometry args={[4, 2.5, 4]} />
-        <meshLambertMaterial color="#d4a96a" transparent opacity={0} />
-      </mesh>
-
-      {/* Roof prism */}
-      <mesh
-        position={[-2.2, 2.5, 2.2]}
-        rotation={[0, Math.PI / 2, 0]}
-        castShadow
-        receiveShadow
-      >
-        <extrudeGeometry args={[roofShape, extrudeSettings]} />
-        <meshLambertMaterial color="#7f1d1d" />
-      </mesh>
-
-      {/* Compass labels */}
-      {(["N", "S", "E", "W"] as const).map((dir) => {
-        const pos: Record<string, [number, number, number]> = {
-          N: [0, 0.05, -3.5],
-          S: [0, 0.05, 3.5],
-          E: [3.5, 0.05, 0],
-          W: [-3.5, 0.05, 0],
-        };
-        return (
-          <Html key={dir} position={pos[dir]} center>
-            <span
-              className="text-xs font-bold pointer-events-none select-none"
-              style={{ color: FACADE_COLORS[dir], textShadow: "0 1px 3px #000" }}
-            >
-              {dir}
-            </span>
-          </Html>
-        );
-      })}
-    </group>
-  );
-}
-
-// ── Camera preset helper ──────────────────────────────────────────────────────
-
-type CameraPreset = "street" | "topdown" | "isometric";
-
-const CAMERA_PRESETS: Record<
-  CameraPreset,
-  { position: [number, number, number]; target: [number, number, number] }
-> = {
-  street:     { position: [8,  3,  10], target: [0, 1, 0] },
-  topdown:    { position: [0,  18,  0], target: [0, 0, 0] },
-  isometric:  { position: [10, 10, 10], target: [0, 1, 0] },
-};
-
-interface CameraControllerProps {
-  preset: CameraPreset;
-}
-
-function CameraController({ preset }: CameraControllerProps) {
-  const { camera } = useThree();
-  const p = CAMERA_PRESETS[preset];
-
-  useEffect(() => {
-    camera.position.set(...p.position);
-    camera.lookAt(...p.target);
-  }, [camera, p]);
-
-  return null;
-}
-
-// ── Sky wrapper that syncs with sun elevation ─────────────────────────────────
-
-interface DynamicSkyProps {
-  azimuth: number;
-  elevation: number;
-}
-
-function DynamicSky({ azimuth, elevation }: DynamicSkyProps) {
-  const turbidity = elevation > 10 ? 6 : elevation > 0 ? 12 : 20;
-  const rayleigh = elevation > 10 ? 2 : elevation > 0 ? 3 : 0.5;
-  // Three.js Sky uses azimuth 0=West, PI=East. Convert from North-clockwise.
-  const threeAzimuth = (azimuth - 180) / 180;
-  const inclination = Math.max(0, (90 - elevation) / 180);
-
-  return (
-    <Sky
-      turbidity={turbidity}
-      rayleigh={rayleigh}
-      mieCoefficient={0.005}
-      mieDirectionalG={0.8}
-      sunPosition={[
-        Math.sin(degToRad(azimuth)) * Math.cos(degToRad(elevation)),
-        Math.sin(degToRad(elevation)),
-        Math.cos(degToRad(azimuth)) * Math.cos(degToRad(elevation)),
-      ]}
-      inclination={inclination}
-      azimuth={threeAzimuth}
-    />
-  );
-}
-
-// ── Date presets ──────────────────────────────────────────────────────────────
-
-type DatePreset = "today" | "summer" | "winter";
-
-const DATE_DECLINATIONS: Record<DatePreset, number> = {
-  today:  0,    // ~equinox
-  summer: 23.5, // summer solstice
-  winter: -23.5,// winter solstice
-};
-
-// ── Main component ────────────────────────────────────────────────────────────
-
-interface PropertyView3DProps {
-  lat: number;
-  lon: number;
-  solarAzimuth?: number;
-  solarElevation?: number;
-}
-
-export default function PropertyView3D({
-  lat,
-  solarAzimuth,
-  solarElevation,
-}: PropertyView3DProps) {
-  const [hourOfDay, setHourOfDay] = useState(12);
-  const [datePreset, setDatePreset] = useState<DatePreset>("today");
-  const [cameraPreset, setCameraPreset] = useState<CameraPreset>("isometric");
-
-  // Compute sun position from slider unless overridden by props
-  const { azimuth, elevation } = useMemo(() => {
-    if (solarAzimuth !== undefined && solarElevation !== undefined && hourOfDay === 12) {
-      return { azimuth: solarAzimuth, elevation: solarElevation };
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    } catch {
+      setError("WebGL is not available in your browser.");
+      return;
     }
-    return computeSunPosition(lat, hourOfDay, DATE_DECLINATIONS[datePreset]);
-  }, [lat, hourOfDay, datePreset, solarAzimuth, solarElevation]);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(w, h);
+    renderer.shadowMap.enabled     = true;
+    renderer.shadowMap.type        = THREE.PCFSoftShadowMap;
+    renderer.toneMapping           = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure   = 1.2;
 
-  const sunDir = useMemo(() => sunDirection(azimuth, elevation), [azimuth, elevation]);
+    const scene  = new THREE.Scene();
+    scene.background = new THREE.Color(0.15, 0.45, 0.90);
+    scene.fog        = new THREE.Fog(0x87ceeb, 40, 120);
 
-  const formatHour = (h: number) => {
-    const hh = Math.floor(h);
-    const mm = Math.round((h - hh) * 60);
-    return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+    const camera = new THREE.PerspectiveCamera(50, w / h, 0.1, 400);
+
+    // Lights
+    scene.add(new THREE.AmbientLight(0xb0c4de, 0.4));
+    const sunLight = new THREE.DirectionalLight(0xfff8e1, 1.8);
+    sunLight.castShadow = true;
+    sunLight.shadow.mapSize.set(2048, 2048);
+    sunLight.shadow.camera.near   = 0.5;
+    sunLight.shadow.camera.far    = 100;
+    sunLight.shadow.camera.left   = -35;
+    sunLight.shadow.camera.right  =  35;
+    sunLight.shadow.camera.top    =  35;
+    sunLight.shadow.camera.bottom = -35;
+    scene.add(sunLight, sunLight.target);
+
+    // Ground plane — initially flat green; satellite texture applied async
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(GROUND_SIZE, GROUND_SIZE, 1, 1),
+      new THREE.MeshLambertMaterial({ color: 0x3a5a40 })
+    );
+    ground.rotation.x    = -Math.PI / 2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // Property marker — amber glowing pillar
+    const markerMesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.15, 0.15, 2.5, 16),
+      new THREE.MeshStandardMaterial({
+        color: 0xf59e0b, emissive: 0xf59e0b, emissiveIntensity: 0.7,
+      })
+    );
+    markerMesh.position.set(0, 1.25, 0);
+    scene.add(markerMesh);
+
+    // Marker halo ring at ground level
+    const haloMesh = new THREE.Mesh(
+      new THREE.RingGeometry(0.6, 1.2, 32),
+      new THREE.MeshBasicMaterial({ color: 0xf59e0b, side: THREE.DoubleSide, transparent: true, opacity: 0.45 })
+    );
+    haloMesh.rotation.x = -Math.PI / 2;
+    haloMesh.position.y = 0.01;
+    scene.add(haloMesh);
+
+    // Animate
+    function animate() {
+      const id = requestAnimationFrame(animate);
+      if (sceneRef.current) sceneRef.current.animId = id;
+      const x = ORBIT_R * Math.sin(phi.current) * Math.cos(theta.current);
+      const y = ORBIT_R * Math.cos(phi.current);
+      const z = ORBIT_R * Math.sin(phi.current) * Math.sin(theta.current);
+      camera.position.set(x, y, z);
+      camera.lookAt(0, 0, 0);
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    sceneRef.current = { renderer, camera, scene, sunLight, ground, animId: 0 };
+    updateSun(sunAz, sunEl);
+    setLoading(false);
+
+    // ── Async: satellite tiles ────────────────────────────────────────────
+    setTileMsg("Loading ESRI satellite imagery…");
+    const tex = await buildSatelliteTexture(lat, lon);
+    if (tex && sceneRef.current) {
+      const mat = sceneRef.current.ground.material as THREE.MeshLambertMaterial;
+      mat.map   = tex;
+      mat.color.set(0xffffff);
+      mat.needsUpdate = true;
+      setTileMsg("🛰 ESRI World Imagery");
+    } else {
+      setTileMsg("⚠ Satellite imagery unavailable");
+    }
+
+    // ── Async: OSM buildings from /neighbors ─────────────────────────────
+    try {
+      const res = await fetch(`${API}/neighbors?lat=${lat}&lon=${lon}&radius=250`);
+      if (res.ok) {
+        const gj = (await res.json()) as { features?: GeoFeature[] };
+        if (sceneRef.current) {
+          for (const f of gj.features ?? []) {
+            const mesh = featureToMesh(f, lat, lon);
+            if (mesh) sceneRef.current.scene.add(mesh);
+          }
+        }
+      }
+    } catch { /* OSM unavailable — scene still works */ }
+  }, [lat, lon, updateSun, sunAz, sunEl]);
+
+  // Init with 50ms defer so container has dimensions
+  useEffect(() => {
+    const id = setTimeout(() => { void initScene(); }, 50);
+    return () => {
+      clearTimeout(id);
+      if (sceneRef.current) {
+        cancelAnimationFrame(sceneRef.current.animId);
+        sceneRef.current.renderer.dispose();
+        sceneRef.current = null;
+      }
+    };
+  }, [initScene]);
+
+  // Camera preset
+  useEffect(() => {
+    const { t, p } = CAM_PRESETS[camPreset];
+    theta.current = t;
+    phi.current   = p;
+  }, [camPreset]);
+
+  // Resize
+  useEffect(() => {
+    const onResize = () => {
+      const r = sceneRef.current;
+      const c = containerRef.current;
+      if (!r || !c) return;
+      const w = c.offsetWidth;
+      r.camera.aspect = w / 480;
+      r.camera.updateProjectionMatrix();
+      r.renderer.setSize(w, 480);
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  // Pointer / touch drag → orbit
+  const onMouseDown  = (e: React.MouseEvent)  => { isDragging.current = true; lastMouse.current = { x: e.clientX, y: e.clientY }; };
+  const onMouseMove  = (e: React.MouseEvent)  => {
+    if (!isDragging.current) return;
+    theta.current -= (e.clientX - lastMouse.current.x) * 0.012;
+    phi.current    = Math.max(0.05, Math.min(Math.PI / 2.05, phi.current + (e.clientY - lastMouse.current.y) * 0.012));
+    lastMouse.current = { x: e.clientX, y: e.clientY };
+  };
+  const onMouseUp    = () => { isDragging.current = false; };
+  const onTouchStart = (e: React.TouchEvent) => {
+    if (e.touches.length !== 1) return;
+    isDragging.current = true;
+    lastMouse.current  = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  };
+  const onTouchMove  = (e: React.TouchEvent) => {
+    if (!isDragging.current || e.touches.length !== 1) return;
+    theta.current -= (e.touches[0].clientX - lastMouse.current.x) * 0.012;
+    phi.current    = Math.max(0.05, Math.min(Math.PI / 2.05, phi.current + (e.touches[0].clientY - lastMouse.current.y) * 0.012));
+    lastMouse.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
   };
 
-  const isDaytime = elevation > 0;
+  const fmtHour = (h: number) =>
+    `${Math.floor(h).toString().padStart(2, "0")}:${Math.round((h % 1) * 60).toString().padStart(2, "0")}`;
+
+  if (error) return (
+    <div className="flex items-center justify-center h-[480px] rounded-xl bg-th-bg-2 border border-th-border">
+      <p className="text-sm text-th-danger">{error}</p>
+    </div>
+  );
 
   return (
-    <div className="relative w-full h-full rounded-xl overflow-hidden" style={{ minHeight: 420 }}>
-      {/* Three.js Canvas */}
-      <Canvas
-        shadows
-        camera={{ position: [10, 10, 10], fov: 50, near: 0.1, far: 200 }}
-        className="w-full h-full"
-        gl={{ antialias: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.2 }}
-      >
-        <Suspense fallback={null}>
-          <DynamicSky azimuth={azimuth} elevation={elevation} />
-          <Environment preset="city" />
-          <House sunDir={sunDir} />
-          <CameraController preset={cameraPreset} />
-          <OrbitControls
-            makeDefault
-            minDistance={4}
-            maxDistance={40}
-            target={[0, 1, 0]}
-            enableDamping
-            dampingFactor={0.08}
-          />
-        </Suspense>
-      </Canvas>
+    <div
+      ref={containerRef}
+      className="relative w-full rounded-xl overflow-hidden"
+      style={{ height: 480 }}
+      aria-label="3D satellite view of property with real ESRI imagery and OSM buildings"
+    >
+      {loading && (
+        <div className="absolute inset-0 bg-gray-950 flex items-center justify-center z-20">
+          <div className="text-center">
+            <div className="w-8 h-8 rounded-full border-2 border-amber-400/30 border-t-amber-400 animate-spin mx-auto mb-3" />
+            <p className="text-sm text-white/70">Building 3D scene…</p>
+          </div>
+        </div>
+      )}
 
-      {/* ── HUD Overlay ──────────────────────────────────────────────────────── */}
+      <canvas
+        ref={canvasRef}
+        className="w-full h-full cursor-grab active:cursor-grabbing"
+        onMouseDown={onMouseDown} onMouseMove={onMouseMove}
+        onMouseUp={onMouseUp}    onMouseLeave={onMouseUp}
+        onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onMouseUp}
+      />
+
+      {/* HUD */}
       <div className="absolute inset-0 pointer-events-none">
 
-        {/* Top-left: Date preset */}
-        <div className="absolute top-3 left-3 pointer-events-auto flex gap-1.5">
-          {(["today", "summer", "winter"] as DatePreset[]).map((d) => (
-            <button
-              key={d}
-              onClick={() => setDatePreset(d)}
-              className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition-all duration-200 ${
-                datePreset === d
-                  ? "bg-th-solar/10 text-th-solar border-th-solar/30"
-                  : "glass-card text-th-text-2 border-th-border hover:text-th-text hover:bg-th-bg-2"
+        {/* Top-left: date picker */}
+        <div className="absolute top-3 left-3 pointer-events-auto flex items-center gap-2 bg-black/70 backdrop-blur-sm rounded-xl px-3 py-2 border border-white/10">
+          <span className="text-white/50 text-xs">📅</span>
+          <select
+            value={month}
+            onChange={(e) => { const m = +e.target.value; setMonth(m); setDay(Math.min(day, DAYS_IN_MONTH[m - 1])); }}
+            className="bg-transparent text-white text-xs font-semibold outline-none cursor-pointer"
+          >
+            {MONTH_NAMES.map((n, i) => <option key={n} value={i + 1} className="bg-gray-900">{n}</option>)}
+          </select>
+          <input
+            type="number" min={1} max={DAYS_IN_MONTH[month - 1]} value={day}
+            onChange={(e) => setDay(Math.max(1, Math.min(+e.target.value, DAYS_IN_MONTH[month - 1])))}
+            className="w-9 bg-transparent text-white text-xs font-bold text-center outline-none border-b border-white/30 focus:border-amber-400"
+          />
+          <button
+            onClick={() => { const t = new Date(); setMonth(t.getMonth() + 1); setDay(t.getDate()); }}
+            className="text-[11px] text-amber-400 font-semibold hover:text-amber-300 transition-colors"
+          >Today</button>
+        </div>
+
+        {/* Top-right: camera presets */}
+        <div className="absolute top-3 right-3 pointer-events-auto flex gap-1">
+          {(["iso", "bird", "street"] as CamPreset[]).map((p) => (
+            <button key={p} onClick={() => setCamPreset(p)}
+              className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition-all ${
+                camPreset === p
+                  ? "bg-amber-500/20 text-amber-400 border-amber-500/40"
+                  : "bg-black/60 text-white/70 border-white/10 hover:text-white hover:border-white/30"
               }`}
-            >
-              {d === "today" ? "Today" : d === "summer" ? "Summer" : "Winter"}
-            </button>
+            >{CAM_LABELS[p]}</button>
           ))}
         </div>
 
-        {/* Top-right: Camera presets */}
-        <div className="absolute top-3 right-3 pointer-events-auto flex flex-col gap-1.5">
-          {(["street", "topdown", "isometric"] as CameraPreset[]).map((p) => (
-            <button
-              key={p}
-              onClick={() => setCameraPreset(p)}
-              className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition-all duration-200 whitespace-nowrap ${
-                cameraPreset === p
-                  ? "bg-th-solar/10 text-th-solar border-th-solar/30"
-                  : "glass-card text-th-text-2 border-th-border hover:text-th-text hover:bg-th-bg-2"
-              }`}
-            >
-              {p === "street" ? "Street" : p === "topdown" ? "Top-Down" : "Isometric"}
-            </button>
-          ))}
-        </div>
+        {/* Satellite label */}
+        {!loading && (
+          <div className="absolute top-12 left-3 bg-black/60 text-white/60 text-[10px] px-2 py-0.5 rounded-md">
+            {tileMsg}
+          </div>
+        )}
 
-        {/* Bottom: Time slider */}
+        {/* Bottom centre: time slider */}
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 pointer-events-auto w-full max-w-md px-4">
-          <div className="glass-card rounded-xl px-4 py-3 border-th-border">
+          <div className="bg-black/70 backdrop-blur-sm rounded-xl px-4 py-3 border border-white/10">
             <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-semibold text-th-text">
-                {isDaytime ? "Daytime" : "Nighttime"}
+              <span className="text-xs text-white/80">{sunEl > 0 ? "☀ Daytime" : "☽ Night"}</span>
+              <span className="text-xs font-mono font-bold text-amber-400">
+                {fmtHour(hourOfDay)} · {MONTH_NAMES[month - 1]} {day}
               </span>
-              <span className="text-xs font-mono font-bold text-th-solar">
-                {formatHour(hourOfDay)}
-              </span>
-              <span className="text-xs text-th-text-2">
-                Az {Math.round(azimuth)}° El {Math.round(elevation)}°
-              </span>
+              <span className="text-xs text-white/50">Az {Math.round(sunAz)}° El {Math.round(sunEl)}°</span>
             </div>
-
-            {/* Custom slider */}
             <input
-              type="range"
-              min={0}
-              max={24}
-              step={0.25}
-              value={hourOfDay}
+              type="range" min={0} max={24} step={0.25} value={hourOfDay}
               onChange={(e) => setHourOfDay(parseFloat(e.target.value))}
               className="w-full accent-amber-400 cursor-pointer h-1.5 rounded-full"
+              aria-label={`Time of day: ${fmtHour(hourOfDay)}`}
             />
-
             <div className="flex justify-between mt-1">
               {["0h", "6h", "12h", "18h", "24h"].map((l) => (
-                <span key={l} className="text-xs text-th-muted">{l}</span>
+                <span key={l} className="text-[10px] text-white/40">{l}</span>
               ))}
             </div>
           </div>
         </div>
 
-        {/* Bottom-left: Facade legend */}
+        {/* Bottom-left: info badge */}
         <div className="absolute bottom-4 left-3 pointer-events-none">
-          <div className="glass-card rounded-lg px-2 py-1.5 border-th-border space-y-0.5">
-            <p className="text-xs font-semibold text-th-text mb-1">Facade Heat</p>
-            {(["S", "E", "W", "N"] as const).map((dir) => (
-              <div key={dir} className="flex items-center gap-1.5">
-                <span
-                  className="w-2.5 h-2.5 rounded-sm inline-block"
-                  style={{ background: FACADE_COLORS[dir] }}
-                />
-                <span className="text-xs text-th-text-2">
-                  {dir === "N" ? "North — Cool" : dir === "S" ? "South — Hot" : `${dir === "E" ? "East" : "West"} — Warm`}
-                </span>
-              </div>
-            ))}
+          <div className="bg-black/65 backdrop-blur-sm rounded-lg px-2 py-1.5 border border-white/10 text-[10px] space-y-0.5">
+            <div className="flex items-center gap-1.5 text-white/70">
+              <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />
+              Property location
+            </div>
+            <div className="text-white/40">Buildings: OpenStreetMap</div>
+            <div className="text-white/40">Imagery: ESRI World</div>
           </div>
         </div>
 
-        {/* Drag hint */}
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity">
-          <span className="text-xs text-th-muted bg-black/40 rounded px-2 py-1">
-            Drag to rotate
-          </span>
-        </div>
+        {/* Drag hint — fades after interaction */}
+        {!isDragging.current && (
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+            <span className="text-[11px] text-white/20 select-none">Drag to rotate</span>
+          </div>
+        )}
+
       </div>
     </div>
   );

@@ -3,6 +3,7 @@
 import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { Navbar } from "@/components/Navbar";
+import { reverseGeocode } from "@/lib/api/addressApi";
 
 const FEATURES = [
   {
@@ -52,8 +53,10 @@ const EXAMPLES = [
 
 export default function HomePage() {
   const router = useRouter();
-  const [address, setAddress] = useState("");
-  const [error, setError]   = useState("");
+  const [address, setAddress]       = useState("");
+  const [error, setError]           = useState("");
+  const [locating, setLocating]     = useState(false);
+  const [locError, setLocError]     = useState("");
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -66,6 +69,36 @@ export default function HomePage() {
   function tryExample(addr: string) {
     setAddress(addr);
     router.push(`/property/${encodeURIComponent(addr)}`);
+  }
+
+  function handleUseLocation() {
+    if (!navigator.geolocation) {
+      setLocError("Geolocation is not supported by your browser.");
+      return;
+    }
+    setLocating(true);
+    setLocError("");
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        try {
+          const loc = await reverseGeocode(pos.coords.latitude, pos.coords.longitude);
+          router.push(`/property/${encodeURIComponent(loc.formatted_address)}`);
+        } catch {
+          setLocError("Could not identify your address. Are you in the US?");
+        } finally {
+          setLocating(false);
+        }
+      },
+      (err) => {
+        setLocating(false);
+        if (err.code === err.PERMISSION_DENIED) {
+          setLocError("Location access denied. Please allow location access in your browser settings.");
+        } else {
+          setLocError("Could not get your location. Please enter your address manually.");
+        }
+      },
+      { timeout: 12000, maximumAge: 60000 }
+    );
   }
 
   return (
@@ -113,9 +146,23 @@ export default function HomePage() {
           {error && <p className="mt-2 text-sm text-th-danger">{error}</p>}
         </form>
 
-        {/* Example pills */}
-        <div className="flex flex-wrap justify-center gap-2 mt-4">
-          <span className="text-xs self-center text-th-muted">Try:</span>
+        {/* GPS + Example pills */}
+        <div className="flex flex-wrap justify-center items-center gap-2 mt-4">
+          {/* Use My Location */}
+          <button
+            type="button"
+            onClick={handleUseLocation}
+            disabled={locating}
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border transition-all hover:-translate-y-0.5 duration-150 disabled:opacity-60 disabled:cursor-not-allowed border-th-solar/40 text-th-solar bg-th-solar/8 hover:bg-th-solar/15"
+          >
+            {locating
+              ? <span className="w-3 h-3 rounded-full border border-t-th-solar border-th-solar/20 animate-spin" />
+              : <span>📍</span>
+            }
+            {locating ? "Locating…" : "Use my location"}
+          </button>
+
+          <span className="text-xs text-th-muted">or try:</span>
           {EXAMPLES.map((addr) => (
             <button
               key={addr}
@@ -127,6 +174,7 @@ export default function HomePage() {
             </button>
           ))}
         </div>
+        {locError && <p className="mt-2 text-xs text-th-danger text-center max-w-sm">{locError}</p>}
       </section>
 
       {/* ── Stats bar ─────────────────────────────────────────── */}

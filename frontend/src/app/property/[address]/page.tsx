@@ -13,7 +13,7 @@ import { ViewModeSwitcher, type ViewMode } from "@/components/ViewModeSwitcher";
 import SolarROICalculator from "@/components/SolarROICalculator";
 import ClimateRiskReport from "@/components/ClimateRiskReport";
 import { incrementPropertyViews } from "@/components/PWAInstallPrompt";
-import { geocodeAddress } from "@/lib/api/addressApi";
+import { geocodeAddress, reverseGeocode } from "@/lib/api/addressApi";
 import type { Location } from "@/types/location";
 
 // Lazy-load heavy 3D components — no SSR
@@ -21,7 +21,7 @@ const PropertyView3D  = lazy(() => import("@/components/views/PropertyView3D"));
 const PropertyView360 = lazy(() => import("@/components/views/PropertyView360").then((m) => ({ default: m.PropertyView360 })));
 const PropertyMap2D   = lazy(() => import("@/components/maps/PropertyMap2D"));
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
+const API = `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost"}/api/v1`;
 
 type Tab = "overview" | "solar" | "weather" | "moon" | "impact" | "ai" | "views";
 
@@ -54,6 +54,31 @@ interface MoonData {
   rise_set?: { moonrise: string | null; moonset: string | null; is_up_all_day: boolean; is_down_all_day: boolean };
   position?: { azimuth_deg: number; elevation_deg: number };
   night_visibility?: { score: number; level: string; moon_impact: string };
+}
+
+interface ForecastDay {
+  date: string; temp_max_c: number; temp_min_c: number;
+  precipitation_mm: number; conditions: string; weather_code: number;
+  uv_index_max: number; wind_speed_max_kmh: number;
+  sunrise?: string; sunset?: string;
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function formatDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function weatherEmoji(code: number): string {
+  if (code === 0) return "☀️";
+  if (code <= 2) return "⛅";
+  if (code <= 3) return "☁️";
+  if (code <= 48) return "🌫️";
+  if (code <= 67) return "🌧️";
+  if (code <= 77) return "❄️";
+  if (code <= 82) return "🌦️";
+  if (code <= 99) return "⛈️";
+  return "🌡️";
 }
 
 // ── Fetchers ─────────────────────────────────────────────────────────────────
@@ -96,6 +121,45 @@ function SectionTitle({ children }: Readonly<{ children: React.ReactNode }>) {
   return <h2 className="text-base font-semibold text-th-text mb-4">{children}</h2>;
 }
 
+const MONTH_LABELS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+function DateBar({ date, onChange }: Readonly<{ date: Date; onChange: (d: Date) => void }>) {
+  const isToday = formatDate(date) === formatDate(new Date());
+
+  function selectMonth(m: number) {
+    const now = new Date();
+    // If same month as today, snap to today; otherwise use the 15th as representative mid-month
+    if (m === now.getMonth()) {
+      onChange(new Date(now));
+    } else {
+      onChange(new Date(now.getFullYear(), m, 15));
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-1.5 mb-5 overflow-x-auto no-scrollbar pb-0.5">
+      {MONTH_LABELS.map((m, i) => (
+        <button
+          key={m} type="button" onClick={() => selectMonth(i)}
+          className={`px-3 py-1.5 rounded-lg text-xs font-medium shrink-0 transition-all border focus-visible:ring-2 focus-visible:ring-amber-500 ${
+            date.getMonth() === i
+              ? "bg-amber-500/20 text-amber-500 border-amber-500/40"
+              : "text-th-text-2 border-th-border hover:text-th-solar hover:border-amber-500/30 hover:bg-th-bg-2"
+          }`}
+        >{m}</button>
+      ))}
+      <div className="w-px h-5 bg-th-border shrink-0 mx-0.5" />
+      <button
+        type="button"
+        onClick={() => onChange(new Date())}
+        className={`shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all border focus-visible:ring-2 focus-visible:ring-amber-500 ${
+          isToday ? "bg-amber-500 text-white border-amber-500" : "text-th-text-2 border-th-border hover:border-amber-500/40 hover:text-th-solar"
+        }`}
+      >Today</button>
+    </div>
+  );
+}
+
 function Loading3D() {
   return (
     <div className="flex items-center justify-center h-80 rounded-2xl bg-th-bg-2 border border-th-border">
@@ -109,7 +173,7 @@ function Loading3D() {
 
 // ── Tab content components ────────────────────────────────────────────────────
 
-function OverviewTab({ location, alerts }: Readonly<{ location: Location; alerts: PropertyAlert[] }>) {
+function OverviewTab({ location, alerts, selectedDate }: Readonly<{ location: Location; alerts: PropertyAlert[]; selectedDate: Date }>) {
   const [solar, setSolar]   = useState<SolarData | null>(null);
   const [weather, setWeather] = useState<WeatherData | null>(null);
 
@@ -132,8 +196,12 @@ function OverviewTab({ location, alerts }: Readonly<{ location: Location; alerts
 
       {location && (
         <div className="glass-card rounded-2xl p-5">
-          <SectionTitle>Today&apos;s Sun Arc</SectionTitle>
-          <SunArcVisualization lat={location.lat} lon={location.lon} />
+          <SectionTitle>
+            {formatDate(selectedDate) === formatDate(new Date())
+              ? "Today's Sun Arc"
+              : `Sun Arc — ${selectedDate.toLocaleDateString("en-US", { month: "long", day: "numeric" })}`}
+          </SectionTitle>
+          <SunArcVisualization lat={location.lat} lon={location.lon} date={selectedDate} />
         </div>
       )}
 
@@ -161,11 +229,12 @@ function OverviewTab({ location, alerts }: Readonly<{ location: Location; alerts
   );
 }
 
-function SolarTab({ location }: Readonly<{ location: Location }>) {
+function SolarTab({ location, selectedDate }: Readonly<{ location: Location; selectedDate: Date }>) {
   const [solar, setSolar] = useState<SolarData | null>(null);
   useEffect(() => {
-    void fetchJson<SolarData>(`${API}/solar/daily?lat=${location.lat}&lon=${location.lon}`).then(setSolar);
-  }, [location]);
+    const dateStr = formatDate(selectedDate);
+    void fetchJson<SolarData>(`${API}/solar/daily?lat=${location.lat}&lon=${location.lon}&date=${dateStr}`).then(setSolar);
+  }, [location, selectedDate]);
 
   return (
     <div className="space-y-6">
@@ -177,8 +246,8 @@ function SolarTab({ location }: Readonly<{ location: Location }>) {
       </div>
 
       <div className="glass-card rounded-2xl p-5">
-        <SectionTitle>Sun Arc — {new Date().toLocaleDateString("en-US", { month: "long", day: "numeric" })}</SectionTitle>
-        <SunArcVisualization lat={location.lat} lon={location.lon} />
+        <SectionTitle>Sun Arc — {selectedDate.toLocaleDateString("en-US", { month: "long", day: "numeric" })}</SectionTitle>
+        <SunArcVisualization lat={location.lat} lon={location.lon} date={selectedDate} />
       </div>
 
       <div className="glass-card rounded-2xl p-5 space-y-2 text-sm text-th-text-2">
@@ -203,9 +272,12 @@ function SolarTab({ location }: Readonly<{ location: Location }>) {
 function WeatherTab({ location }: Readonly<{ location: Location }>) {
   const [weather, setWeather]   = useState<WeatherData | null>(null);
   const [monthly, setMonthly]   = useState<MonthlyDataPoint[]>([]);
+  const [forecast, setForecast] = useState<ForecastDay[]>([]);
 
   useEffect(() => {
     void fetchJson<WeatherData>(`${API}/weather/current?lat=${location.lat}&lon=${location.lon}`).then(setWeather);
+    void fetchJson<{ days: ForecastDay[] }>(`${API}/weather/forecast?lat=${location.lat}&lon=${location.lon}&days=7`)
+      .then((d) => { if (d) setForecast(d.days); });
     void fetchJson<{ monthly: Array<{ month: number; avg_temp_max_c: number; avg_temp_min_c: number }> }>(
       `${API}/weather/monthly?lat=${location.lat}&lon=${location.lon}`
     ).then((d) => {
@@ -252,6 +324,30 @@ function WeatherTab({ location }: Readonly<{ location: Location }>) {
         <HourlyTimeline hourlyTemps={hourlyTemps} hourlyUV={hourlyUV} hourlySolarElevation={hourlyElev} />
       </div>
 
+      {forecast.length > 0 && (
+        <div className="glass-card rounded-2xl p-5">
+          <SectionTitle>7-Day Forecast</SectionTitle>
+          <div className="grid grid-cols-7 gap-1.5">
+            {forecast.map((day) => {
+              const dayLabel = new Date(day.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short" });
+              const dateLabel = new Date(day.date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" });
+              return (
+                <div key={day.date} className="flex flex-col items-center gap-1 p-2 rounded-xl bg-th-bg-2 border border-th-border text-center min-w-0">
+                  <div className="text-[10px] font-semibold text-th-text">{dayLabel}</div>
+                  <div className="text-[9px] text-th-muted">{dateLabel}</div>
+                  <div className="text-xl leading-none my-0.5">{weatherEmoji(day.weather_code)}</div>
+                  <div className="text-xs font-bold text-amber-500">{Math.round(day.temp_max_c)}°</div>
+                  <div className="text-xs text-th-muted">{Math.round(day.temp_min_c)}°</div>
+                  {day.precipitation_mm > 0.5 && (
+                    <div className="text-[9px] text-blue-400">{day.precipitation_mm.toFixed(0)}mm</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {weather?.risk_flags && weather.risk_flags.length > 0 && (
         <div className="glass-card rounded-2xl p-5">
           <SectionTitle>Risk Flags</SectionTitle>
@@ -268,11 +364,12 @@ function WeatherTab({ location }: Readonly<{ location: Location }>) {
   );
 }
 
-function MoonTab({ location }: Readonly<{ location: Location }>) {
+function MoonTab({ location, selectedDate }: Readonly<{ location: Location; selectedDate: Date }>) {
   const [moon, setMoon] = useState<MoonData | null>(null);
   useEffect(() => {
-    void fetchJson<MoonData>(`${API}/moon/daily?lat=${location.lat}&lon=${location.lon}`).then(setMoon);
-  }, [location]);
+    const dateStr = formatDate(selectedDate);
+    void fetchJson<MoonData>(`${API}/moon/daily?lat=${location.lat}&lon=${location.lon}&date=${dateStr}`).then(setMoon);
+  }, [location, selectedDate]);
 
   if (!moon) return (
     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -561,7 +658,7 @@ function ViewsTab({ location }: Readonly<{ location: Location }>) {
         )}
         {viewMode === "360" && (
           <div aria-label="360-degree sky dome panoramic view">
-            <PropertyView360 />
+            <PropertyView360 lat={location.lat} lon={location.lon} />
           </div>
         )}
       </Suspense>
@@ -601,11 +698,12 @@ export default function PropertyPage({ params }: Readonly<{ params: Promise<{ ad
   const router = useRouter();
   const decoded = decodeURIComponent(address);
 
-  const [location, setLocation]   = useState<Location | null>(null);
-  const [activeTab, setActiveTab] = useState<Tab>("overview");
-  const [loading, setLoading]     = useState(true);
-  const [error, setError]         = useState<string | null>(null);
-  const [alerts, setAlerts]       = useState<PropertyAlert[]>([]);
+  const [location, setLocation]     = useState<Location | null>(null);
+  const [activeTab, setActiveTab]   = useState<Tab>("overview");
+  const [loading, setLoading]       = useState(true);
+  const [error, setError]           = useState<string | null>(null);
+  const [alerts, setAlerts]         = useState<PropertyAlert[]>([]);
+  const [selectedDate, setSelectedDate] = useState<Date>(() => new Date());
 
   useEffect(() => {
     (async () => {
@@ -657,6 +755,26 @@ export default function PropertyPage({ params }: Readonly<{ params: Promise<{ ad
           >
             <input name="q" placeholder="Search another address…"
               className="input-field flex-1 rounded-xl px-3 py-2 text-sm" />
+            <button
+              type="button"
+              title="Use my current location"
+              onClick={() => {
+                if (!navigator.geolocation) return;
+                navigator.geolocation.getCurrentPosition(
+                  async (pos) => {
+                    try {
+                      const loc = await reverseGeocode(pos.coords.latitude, pos.coords.longitude);
+                      router.push(`/property/${encodeURIComponent(loc.formatted_address)}`);
+                    } catch { /* ignore */ }
+                  },
+                  () => { /* denied */ },
+                  { timeout: 10000 }
+                );
+              }}
+              className="px-3 py-2 rounded-xl border border-th-border bg-th-bg-2 text-th-text-2 hover:text-th-solar hover:border-th-solar/40 transition-all text-base"
+            >
+              📍
+            </button>
             <button type="submit" className="btn-solar px-4 py-2 rounded-xl text-sm font-semibold">Go</button>
           </form>
         </div>
@@ -710,6 +828,9 @@ export default function PropertyPage({ params }: Readonly<{ params: Promise<{ ad
 
       {/* Content */}
       <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 py-6">
+        {location && activeTab !== "ai" && activeTab !== "views" && (
+          <DateBar date={selectedDate} onChange={setSelectedDate} />
+        )}
         {(() => {
           let tabContent: React.ReactNode = null;
           if (loading) {
@@ -727,10 +848,10 @@ export default function PropertyPage({ params }: Readonly<{ params: Promise<{ ad
                 tabIndex={0}
                 className="focus-visible:outline-none"
               >
-                {activeTab === "overview" && <OverviewTab location={location} alerts={alerts} />}
-                {activeTab === "solar"    && <SolarTab    location={location} />}
+                {activeTab === "overview" && <OverviewTab location={location} alerts={alerts} selectedDate={selectedDate} />}
+                {activeTab === "solar"    && <SolarTab    location={location} selectedDate={selectedDate} />}
                 {activeTab === "weather"  && <WeatherTab  location={location} />}
-                {activeTab === "moon"     && <MoonTab     location={location} />}
+                {activeTab === "moon"     && <MoonTab     location={location} selectedDate={selectedDate} />}
                 {activeTab === "impact"   && <ImpactTab   location={location} />}
                 {activeTab === "ai"       && <AITab        location={location} />}
                 {activeTab === "views"    && <ViewsTab    location={location} />}

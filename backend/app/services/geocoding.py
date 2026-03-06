@@ -1,7 +1,13 @@
 """Geocoding service — converts a US address string to lat/lon + structured fields.
 
-Primary:  Geocodio API (requires GEOCODIO_API_KEY in settings)
-Fallback: Nominatim / OpenStreetMap (free, no key, US-only filter applied client-side)
+Provider cascade (all free options tried before giving up):
+  1. Geocodio      — requires GEOCODIO_API_KEY, very comprehensive US coverage
+  2. Mapbox        — requires MAPBOX_TOKEN, comprehensive coverage
+  3. Census        — free, no key, Public_AR_Current benchmark (most up-to-date)
+  4. Photon        — free, no key, komoot OSM-powered, good building coverage
+  5. Nominatim     — free, no key, OpenStreetMap
+  6. ZIP centroid  — free, no key, last resort: resolves the ZIP code area so
+                     brand-new addresses still get approximate coordinates
 """
 
 from __future__ import annotations
@@ -28,12 +34,15 @@ US_STATES = {
     "WI", "WY", "DC",
 }
 
-GEOCODIO_URL = "https://api.geocod.io/v1.7/geocode"
-NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
-CENSUS_GEOCODER_URL = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
+GEOCODIO_URL         = "https://api.geocod.io/v1.7/geocode"
+NOMINATIM_URL        = "https://nominatim.openstreetmap.org/search"
+NOMINATIM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse"
+CENSUS_GEOCODER_URL  = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
 MAPBOX_GEOCODING_URL = "https://api.mapbox.com/geocoding/v5/mapbox.places/{}.json"
+PHOTON_URL           = "https://photon.komoot.io/api/"
+ZIPPOPOTAM_URL       = "https://api.zippopotam.us/us/{}"
 
-REQUEST_TIMEOUT = 10.0  # seconds
+REQUEST_TIMEOUT = 12.0  # seconds
 
 
 @dataclass
@@ -57,6 +66,12 @@ def _address_slug(address: str) -> str:
     nfkd = unicodedata.normalize("NFKD", address.lower())
     cleaned = re.sub(r"[^a-z0-9 ,]", "", nfkd)
     return re.sub(r"\s+", "_", cleaned.strip())
+
+
+def _extract_zip(address: str) -> str | None:
+    """Extract 5-digit ZIP code from an address string."""
+    m = re.search(r"\b(\d{5})(?:-\d{4})?\b", address)
+    return m.group(1) if m else None
 
 
 # ── Geocodio provider ──────────────────────────────────────────────────────────
@@ -92,7 +107,7 @@ async def _geocode_via_geocodio(address: str) -> GeocodedLocation | None:
 
     state = components.get("state", "").upper()
     if state not in US_STATES:
-        return None  # Non-US result
+        return None
 
     return GeocodedLocation(
         formatted_address=best.get("formatted_address", address),
@@ -102,58 +117,6 @@ async def _geocode_via_geocodio(address: str) -> GeocodedLocation | None:
         state=state,
         zip=components.get("zip", ""),
     )
-
-
-# ── Nominatim fallback ─────────────────────────────────────────────────────────
-
-async def _geocode_via_nominatim(address: str) -> GeocodedLocation | None:
-    """Call Nominatim (OpenStreetMap) as a free fallback."""
-    params = {
-        "q": address,
-        "format": "jsonv2",
-        "limit": 5,
-        "countrycodes": "us",
-        "addressdetails": 1,
-    }
-    headers = {"User-Agent": "HelioNest-AI/1.0 contact:helionest-app@proton.me"}
-
-    try:
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            resp = await client.get(NOMINATIM_URL, params=params, headers=headers)
-            resp.raise_for_status()
-            results = resp.json()
-    except Exception as exc:
-        logger.warning("Nominatim request failed: %s", exc)
-        return None
-
-    for r in results:
-        addr = r.get("address", {})
-        state_code = addr.get("ISO3166-2-lvl4", "").replace("US-", "").upper()
-        if state_code not in US_STATES:
-            # Try state abbreviation from name lookup
-            state_name = addr.get("state", "")
-            state_code = _state_name_to_abbr(state_name)
-            if state_code not in US_STATES:
-                continue
-
-        city = (
-            addr.get("city")
-            or addr.get("town")
-            or addr.get("village")
-            or addr.get("county", "")
-        )
-        postcode = addr.get("postcode", "").split("-")[0]  # Take 5-digit zip
-
-        return GeocodedLocation(
-            formatted_address=r.get("display_name", address),
-            lat=float(r.get("lat", 0)),
-            lon=float(r.get("lon", 0)),
-            city=city,
-            state=state_code,
-            zip=postcode,
-        )
-
-    return None
 
 
 # ── Mapbox Geocoding API ───────────────────────────────────────────────────────
@@ -187,7 +150,6 @@ async def _geocode_via_mapbox(address: str) -> GeocodedLocation | None:
     coords = best.get("geometry", {}).get("coordinates", [0, 0])
     lon, lat = float(coords[0]), float(coords[1])
 
-    # Parse context array for postcode / place / region
     zip_code = ""
     city = ""
     state_code = ""
@@ -203,7 +165,7 @@ async def _geocode_via_mapbox(address: str) -> GeocodedLocation | None:
                 state_code = short_code
 
     if not state_code:
-        return None  # Non-US or couldn't determine state
+        return None
 
     return GeocodedLocation(
         formatted_address=best.get("place_name", address),
@@ -218,10 +180,10 @@ async def _geocode_via_mapbox(address: str) -> GeocodedLocation | None:
 # ── US Census Geocoder (free, no key, US only) ─────────────────────────────────
 
 async def _geocode_via_census(address: str) -> GeocodedLocation | None:
-    """Call the free US Census Bureau geocoder — no API key required."""
+    """Call the free US Census Bureau geocoder using the current benchmark."""
     params = {
         "address": address,
-        "benchmark": "2020",
+        "benchmark": "Public_AR_Current",  # most up-to-date TIGER data
         "format": "json",
     }
     try:
@@ -256,6 +218,167 @@ async def _geocode_via_census(address: str) -> GeocodedLocation | None:
     )
 
 
+# ── Photon (komoot) — free, no key, OSM-powered ────────────────────────────────
+
+async def _geocode_via_photon(address: str) -> GeocodedLocation | None:
+    """Call Photon geocoder (photon.komoot.io) — free, no API key, OSM data."""
+    params = {
+        "q": address,
+        "limit": 5,
+        "lang": "en",
+        # Bounding box roughly covering the contiguous US + AK/HI
+        "bbox": "-180,18,-60,72",
+    }
+    headers = {"User-Agent": "HelioNest-AI/1.0 contact:helionest-app@proton.me"}
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            resp = await client.get(PHOTON_URL, params=params, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        logger.warning("Photon geocoding request failed: %s", exc)
+        return None
+
+    for feature in data.get("features", []):
+        props = feature.get("properties", {})
+        country_code = props.get("country_code", "").lower()
+        if country_code != "us":
+            continue
+
+        state_name = props.get("state", "")
+        state_code = _state_name_to_abbr(state_name)
+        if state_code not in US_STATES:
+            continue
+
+        coords = feature.get("geometry", {}).get("coordinates", [0, 0])
+        lon, lat = float(coords[0]), float(coords[1])
+
+        city = props.get("city") or props.get("town") or props.get("village") or props.get("county", "")
+        zip_code = props.get("postcode", "").split("-")[0]
+
+        # Build a formatted address from available parts
+        parts = []
+        if props.get("housenumber"):
+            parts.append(f"{props['housenumber']} {props.get('street', '')}")
+        elif props.get("street"):
+            parts.append(props["street"])
+        if city:
+            parts.append(city)
+        parts.append(f"{state_code} {zip_code}".strip())
+
+        return GeocodedLocation(
+            formatted_address=", ".join(p for p in parts if p),
+            lat=lat,
+            lon=lon,
+            city=city,
+            state=state_code,
+            zip=zip_code,
+        )
+
+    return None
+
+
+# ── Nominatim fallback ─────────────────────────────────────────────────────────
+
+async def _geocode_via_nominatim(address: str) -> GeocodedLocation | None:
+    """Call Nominatim (OpenStreetMap) as a free fallback."""
+    params = {
+        "q": address,
+        "format": "jsonv2",
+        "limit": 5,
+        "countrycodes": "us",
+        "addressdetails": 1,
+    }
+    headers = {"User-Agent": "HelioNest-AI/1.0 contact:helionest-app@proton.me"}
+
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            resp = await client.get(NOMINATIM_URL, params=params, headers=headers)
+            resp.raise_for_status()
+            results = resp.json()
+    except Exception as exc:
+        logger.warning("Nominatim request failed: %s", exc)
+        return None
+
+    for r in results:
+        addr = r.get("address", {})
+        state_code = addr.get("ISO3166-2-lvl4", "").replace("US-", "").upper()
+        if state_code not in US_STATES:
+            state_name = addr.get("state", "")
+            state_code = _state_name_to_abbr(state_name)
+            if state_code not in US_STATES:
+                continue
+
+        city = (
+            addr.get("city")
+            or addr.get("town")
+            or addr.get("village")
+            or addr.get("county", "")
+        )
+        postcode = addr.get("postcode", "").split("-")[0]
+
+        return GeocodedLocation(
+            formatted_address=r.get("display_name", address),
+            lat=float(r.get("lat", 0)),
+            lon=float(r.get("lon", 0)),
+            city=city,
+            state=state_code,
+            zip=postcode,
+        )
+
+    return None
+
+
+# ── ZIP centroid fallback (last resort) ────────────────────────────────────────
+
+async def _geocode_via_zip_centroid(address: str) -> GeocodedLocation | None:
+    """Last-resort fallback: parse the ZIP code and resolve its centroid.
+
+    Used for brand-new construction addresses that are not yet in any geocoding
+    database. Returns the ZIP code area centre (accurate to within ~5 miles).
+    """
+    zip_code = _extract_zip(address)
+    if not zip_code:
+        return None
+
+    url = ZIPPOPOTAM_URL.format(zip_code)
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        logger.warning("ZIP centroid lookup failed for %s: %s", zip_code, exc)
+        return None
+
+    places = data.get("places", [])
+    if not places:
+        return None
+
+    place = places[0]
+    state_abbr = place.get("state abbreviation", "").upper()
+    if state_abbr not in US_STATES:
+        return None
+
+    city = place.get("place name", "")
+    lat  = float(place.get("latitude",  0))
+    lon  = float(place.get("longitude", 0))
+
+    # Preserve the user's original street address so the DB record is useful,
+    # but append "(area)" to indicate approximate coordinates.
+    formatted = f"{address.split(',')[0].strip()}, {city}, {state_abbr} {zip_code} (area)"
+
+    logger.info("ZIP centroid fallback used for %r → %s, %s", address, city, state_abbr)
+    return GeocodedLocation(
+        formatted_address=formatted,
+        lat=lat,
+        lon=lon,
+        city=city,
+        state=state_abbr,
+        zip=zip_code,
+    )
+
+
 def _state_name_to_abbr(name: str) -> str:
     """Convert full state name to 2-letter abbreviation."""
     mapping = {
@@ -276,17 +399,110 @@ def _state_name_to_abbr(name: str) -> str:
     return mapping.get(name.lower(), "")
 
 
+# ── Reverse geocoding (lat/lon → address) ─────────────────────────────────────
+
+async def reverse_geocode(lat: float, lon: float) -> GeocodedLocation:
+    """Convert GPS coordinates to a US street address via Nominatim reverse geocode.
+
+    Cached by rounded coordinates (4 decimal places ≈ 11 m accuracy).
+    Raises GeocodingError if the location is outside the US or cannot be resolved.
+    """
+    cache_key = make_cache_key("revgeo", f"{lat:.4f}_{lon:.4f}")
+    cached = await cache_get(cache_key)
+    if cached:
+        logger.debug("Reverse geocode cache hit: %.4f, %.4f", lat, lon)
+        return GeocodedLocation(**cached)
+
+    params = {
+        "lat": lat,
+        "lon": lon,
+        "format": "jsonv2",
+        "addressdetails": 1,
+        "zoom": 18,  # house-level detail
+    }
+    headers = {"User-Agent": "HelioNest-AI/1.0 contact:helionest-app@proton.me"}
+
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            resp = await client.get(NOMINATIM_REVERSE_URL, params=params, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        logger.warning("Nominatim reverse geocode failed: %s", exc)
+        raise GeocodingError(f"Could not reverse geocode ({lat:.5f}, {lon:.5f})")
+
+    if "error" in data:
+        raise GeocodingError(f"Location ({lat:.5f}, {lon:.5f}) is not recognized")
+
+    addr = data.get("address", {})
+
+    # Determine US state
+    state_code = addr.get("ISO3166-2-lvl4", "").replace("US-", "").upper()
+    if state_code not in US_STATES:
+        state_code = _state_name_to_abbr(addr.get("state", ""))
+    if state_code not in US_STATES:
+        raise GeocodingError(
+            f"Location ({lat:.5f}, {lon:.5f}) is outside the US"
+        )
+
+    city = (
+        addr.get("city")
+        or addr.get("town")
+        or addr.get("village")
+        or addr.get("suburb")
+        or addr.get("county", "")
+    )
+    postcode = addr.get("postcode", "").split("-")[0]
+
+    # Build clean street address
+    house_number = addr.get("house_number", "")
+    road = addr.get("road", "")
+    street_part = f"{house_number} {road}".strip() if house_number else road
+
+    if street_part:
+        formatted = f"{street_part}, {city}, {state_code} {postcode}".strip(", ")
+    else:
+        formatted = f"{city}, {state_code} {postcode}".strip(", ")
+
+    result = GeocodedLocation(
+        formatted_address=formatted,
+        lat=float(data.get("lat", lat)),
+        lon=float(data.get("lon", lon)),
+        city=city,
+        state=state_code,
+        zip=postcode,
+    )
+
+    await cache_set(
+        cache_key,
+        {
+            "formatted_address": result.formatted_address,
+            "lat": result.lat,
+            "lon": result.lon,
+            "city": result.city,
+            "state": result.state,
+            "zip": result.zip,
+        },
+        settings.CACHE_TTL_GEOCODE,
+    )
+    logger.info(
+        "Reverse geocoded (%.4f, %.4f) → %s", lat, lon, result.formatted_address
+    )
+    return result
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 async def geocode_address(address: str) -> GeocodedLocation:
     """Geocode a US address string.
 
-    1. Check Redis cache (TTL: 7 days)
-    2. Try Geocodio (if API key is set)
-    3. Try Mapbox (if MAPBOX_TOKEN is set) — comprehensive US address coverage
-    4. Fall back to US Census Geocoder (free, no key)
-    5. Fall back to Nominatim
-    6. Raise GeocodingError if nothing works
+    Provider cascade (no API keys required for steps 3–6):
+      1. Geocodio          — requires GEOCODIO_API_KEY
+      2. Mapbox            — requires MAPBOX_TOKEN
+      3. Census (current)  — free, no key, TIGER/Current data
+      4. Photon (komoot)   — free, no key, OSM data
+      5. Nominatim         — free, no key, OSM data
+      6. ZIP centroid      — free, no key, always resolves if ZIP is present
     """
     slug = _address_slug(address)
     cache_key = make_cache_key("geocode", slug)
@@ -297,14 +513,17 @@ async def geocode_address(address: str) -> GeocodedLocation:
         logger.debug("Geocode cache hit: %s", slug)
         return GeocodedLocation(**cached)
 
-    # Try providers in order: Geocodio → Mapbox → Census → Nominatim
     result = await _geocode_via_geocodio(address)
     if result is None:
         result = await _geocode_via_mapbox(address)
     if result is None:
         result = await _geocode_via_census(address)
     if result is None:
+        result = await _geocode_via_photon(address)
+    if result is None:
         result = await _geocode_via_nominatim(address)
+    if result is None:
+        result = await _geocode_via_zip_centroid(address)
 
     if result is None:
         raise GeocodingError(f"Could not geocode address: {address!r}")
@@ -323,5 +542,8 @@ async def geocode_address(address: str) -> GeocodedLocation:
         settings.CACHE_TTL_GEOCODE,
     )
 
-    logger.info("Geocoded %r → %s, %s (%.4f, %.4f)", address, result.city, result.state, result.lat, result.lon)
+    logger.info(
+        "Geocoded %r → %s, %s (%.4f, %.4f)",
+        address, result.city, result.state, result.lat, result.lon,
+    )
     return result

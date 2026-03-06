@@ -242,3 +242,10 @@
   0%, 100% { box-shadow: 0 0 20px rgba(251,191,36,0.4), 0 0 60px rgba(251,191,36,0.1); }
   50%       { box-shadow: 0 0 40px rgba(251,191,36,0.7), 0 0 100px rgba(251,191,36,0.2); }
 }
+
+/* ── Leaflet map tile fix ────────────────────────────────────────────────────── */
+/* Prevent Tailwind's img max-width rule from distorting OSM map tiles */
+.leaflet-container img {
+  max-width: none !important;
+  max-height: none !important;
+}

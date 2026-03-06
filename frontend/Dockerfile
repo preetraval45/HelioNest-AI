@@ -2,19 +2,19 @@
 FROM node:22-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --legacy-peer-deps
+RUN npm install --legacy-peer-deps
 
 # ── Stage 2: build ────────────────────────────────────────────────────────────
 FROM node:22-alpine AS builder
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --legacy-peer-deps && \
+RUN npm install --legacy-peer-deps && \
     printf '// stub\n' > node_modules/@types/mapbox__point-geometry/index.d.ts
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
 
 # These are baked into the browser bundle at build time
-ARG NEXT_PUBLIC_API_URL=http://localhost
+ARG NEXT_PUBLIC_API_URL=http://localhost:3000
 ARG NEXT_PUBLIC_MAPBOX_TOKEN=
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 ENV NEXT_PUBLIC_MAPBOX_TOKEN=$NEXT_PUBLIC_MAPBOX_TOKEN
