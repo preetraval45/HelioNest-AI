@@ -20,7 +20,10 @@ class Settings(BaseSettings):
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
 
-    # AI
+    # AI — Ollama (local, free)
+    OLLAMA_BASE_URL: str = "http://ollama:11434"
+    OLLAMA_MODEL: str = "llama3.2"
+    # Legacy — kept as optional empty string so old env files don't break
     ANTHROPIC_API_KEY: str = ""
 
     # External APIs

@@ -1,12 +1,22 @@
 version: "3.9"
 
-# Development overrides — hot reload for both backend and frontend
+# Development overrides — hot reload for backend; production build for frontend
 # Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# After changing frontend source, rebuild the image:
+#   docker-compose -f docker-compose.yml -f docker-compose.dev.yml build frontend
+# Then restart: docker-compose ... up -d
 
 services:
   postgres:
     ports:
       - "5432:5432"
+
+  ollama:
+    ports:
+      - "11434:11434"
+    # Pull llama3.2 on first start; cached on subsequent starts
+    entrypoint: ["/bin/sh", "-c", "ollama serve & until ollama list 2>/dev/null; do sleep 2; done; ollama pull llama3.2; wait"]
 
   redis:
     ports:
@@ -16,6 +26,8 @@ services:
     build:
       context: ../backend
       dockerfile: Dockerfile.dev
+    ports:
+      - "8000:8000"               # expose backend directly for dev tools
     volumes:
       - ../backend:/app           # mount source for hot reload
     environment:
@@ -23,13 +35,16 @@ services:
       ENVIRONMENT: development
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
+  # Frontend: uses the production multi-stage Dockerfile so `next build` runs
+  # at IMAGE BUILD TIME (docker-compose build), not at container start.
+  # Container starts in ~3 seconds instead of rebuilding for 3-5 minutes.
   frontend:
     build:
       context: ../frontend
-      dockerfile: Dockerfile.dev
-    volumes:
-      - ../frontend:/app          # mount source for hot reload
-      - /app/node_modules         # preserve node_modules inside container
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: "http://localhost:3000"
+    ports:
+      - "3001:3000"               # direct access alongside nginx (nginx is on :3000)
     environment:
-      NODE_ENV: development
-    command: npm run dev
+      NODE_ENV: production

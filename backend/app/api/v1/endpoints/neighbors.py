@@ -125,5 +125,5 @@ async def get_neighbor_buildings(
     result = _overpass_to_geojson(data)
 
     # Cache for 24 h — OSM building data changes rarely
-    await cache_set(cache_key, result.model_dump(), ttl=86400)
+    await cache_set(cache_key, result.model_dump(mode="json"), ttl=86400)
     return result

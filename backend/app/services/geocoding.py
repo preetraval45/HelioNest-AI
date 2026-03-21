@@ -43,6 +43,10 @@ PHOTON_URL           = "https://photon.komoot.io/api/"
 ZIPPOPOTAM_URL       = "https://api.zippopotam.us/us/{}"
 
 REQUEST_TIMEOUT = 12.0  # seconds
+USER_AGENT = "HelioNest-AI/1.0 contact:helionest-app@proton.me"
+
+# US state name patterns for detecting incomplete addresses
+_US_INDICATORS = frozenset({"usa", "united states", "u.s.a", "u.s.", "america"})
 
 
 @dataclass
@@ -72,6 +76,28 @@ def _extract_zip(address: str) -> str | None:
     """Extract 5-digit ZIP code from an address string."""
     m = re.search(r"\b(\d{5})(?:-\d{4})?\b", address)
     return m.group(1) if m else None
+
+
+def _has_us_indicator(address: str) -> bool:
+    """Return True if the address already contains an explicit US indicator."""
+    lower = address.lower()
+    return any(ind in lower for ind in _US_INDICATORS)
+
+
+def _has_city_or_state(address: str) -> bool:
+    """Heuristic: True if the address has at least 2 commas or a 2-letter US state abbreviation."""
+    if address.count(",") >= 1:
+        return True
+    # Look for a 2-letter US state abbr preceded by a space or comma
+    for state in US_STATES:
+        if re.search(r"[\s,]" + state + r"[\s,\d]", address, re.IGNORECASE):
+            return True
+    return False
+
+
+def _strip_house_number(address: str) -> str:
+    """Remove leading house number from a street address, e.g. '1003 Tundra Swan Dr' -> 'Tundra Swan Dr'."""
+    return re.sub(r"^\s*\d+[-\w]?\s+", "", address).strip()
 
 
 # ── Geocodio provider ──────────────────────────────────────────────────────────
@@ -229,7 +255,7 @@ async def _geocode_via_photon(address: str) -> GeocodedLocation | None:
         # Bounding box roughly covering the contiguous US + AK/HI
         "bbox": "-180,18,-60,72",
     }
-    headers = {"User-Agent": "HelioNest-AI/1.0 contact:helionest-app@proton.me"}
+    headers = {"User-Agent": USER_AGENT}
     try:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             resp = await client.get(PHOTON_URL, params=params, headers=headers)
@@ -289,7 +315,7 @@ async def _geocode_via_nominatim(address: str) -> GeocodedLocation | None:
         "countrycodes": "us",
         "addressdetails": 1,
     }
-    headers = {"User-Agent": "HelioNest-AI/1.0 contact:helionest-app@proton.me"}
+    headers = {"User-Agent": USER_AGENT}
 
     try:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
@@ -420,7 +446,7 @@ async def reverse_geocode(lat: float, lon: float) -> GeocodedLocation:
         "addressdetails": 1,
         "zoom": 18,  # house-level detail
     }
-    headers = {"User-Agent": "HelioNest-AI/1.0 contact:helionest-app@proton.me"}
+    headers = {"User-Agent": USER_AGENT}
 
     try:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
@@ -491,6 +517,27 @@ async def reverse_geocode(lat: float, lon: float) -> GeocodedLocation:
     return result
 
 
+async def _geocode_augmented_fallbacks(address: str) -> GeocodedLocation | None:
+    """Try variations of a partial address that failed all standard providers."""
+    # Strategy 1: append ", USA" to anchor providers to the US
+    if not _has_us_indicator(address):
+        augmented = address.rstrip(", ") + ", USA"
+        logger.debug("Trying augmented address: %r", augmented)
+        result = await _geocode_via_photon(augmented) or await _geocode_via_nominatim(augmented)
+        if result:
+            return result
+
+    # Strategy 2: strip leading house number → street-level centroid
+    stripped = _strip_house_number(address)
+    if stripped and stripped != address:
+        logger.debug("Trying street-only address: %r", stripped)
+        result = await _geocode_via_photon(stripped) or await _geocode_via_nominatim(stripped)
+        if result:
+            return result
+
+    return None
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 async def geocode_address(address: str) -> GeocodedLocation:
@@ -513,17 +560,15 @@ async def geocode_address(address: str) -> GeocodedLocation:
         logger.debug("Geocode cache hit: %s", slug)
         return GeocodedLocation(**cached)
 
-    result = await _geocode_via_geocodio(address)
-    if result is None:
-        result = await _geocode_via_mapbox(address)
-    if result is None:
-        result = await _geocode_via_census(address)
-    if result is None:
-        result = await _geocode_via_photon(address)
-    if result is None:
-        result = await _geocode_via_nominatim(address)
-    if result is None:
-        result = await _geocode_via_zip_centroid(address)
+    result = (
+        await _geocode_via_geocodio(address)
+        or await _geocode_via_mapbox(address)
+        or await _geocode_via_census(address)
+        or await _geocode_via_photon(address)
+        or await _geocode_via_nominatim(address)
+        or await _geocode_augmented_fallbacks(address)
+        or await _geocode_via_zip_centroid(address)
+    )
 
     if result is None:
         raise GeocodingError(f"Could not geocode address: {address!r}")

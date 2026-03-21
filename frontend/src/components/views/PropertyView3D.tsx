@@ -7,11 +7,12 @@ import * as THREE from "three";
 
 const ZOOM          = 18;            // ESRI tile zoom (≈155m per tile at mid-lat)
 const TILE_PX       = 256;           // pixels per tile
-const GRID          = 3;             // 3×3 tile grid (9 tiles total)
-const GROUND_SIZE   = 60;            // Three.js scene units for the ground plane
-const SCENE_SCALE   = 0.10;          // 1m → 0.10 scene units  (so 600m → 60 units)
-const BUILD_H_MULT  = 3.5;           // exaggerate building heights for visibility
-const ORBIT_R       = 22;
+const GRID          = 5;             // 5×5 tile grid (25 tiles — wider satellite coverage)
+const GROUND_SIZE   = 80;            // Three.js scene units for the ground plane
+const SCENE_SCALE   = 0.1;           // 1m → 0.1 scene units  (600m → 60 units)
+const ORBIT_R_MIN   = 5;
+const ORBIT_R_MAX   = 80;
+const ORBIT_R_INIT  = 22;
 const METERS_PER_DEG_LAT = 111_320;
 
 const API = `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost"}/api/v1`;
@@ -31,7 +32,7 @@ function latLonToTileXY(lat: number, lon: number, z: number) {
   return { tileX, tileY };
 }
 
-/** Load a 3×3 grid of ESRI World Imagery tiles and stitch into a CanvasTexture */
+/** Load a 5×5 grid of ESRI World Imagery tiles and stitch into a CanvasTexture */
 async function buildSatelliteTexture(lat: number, lon: number): Promise<THREE.CanvasTexture | null> {
   try {
     const { tileX: cx, tileY: cy } = latLonToTileXY(lat, lon, ZOOM);
@@ -54,7 +55,6 @@ async function buildSatelliteTexture(lat: number, lon: number): Promise<THREE.Ca
             resolve();
           };
           img.onerror = () => resolve();
-          // ESRI uses {z}/{y}/{x} order
           img.src = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${ZOOM}/${cy + dy}/${cx + dx}`;
         });
       })
@@ -99,37 +99,56 @@ function computeSunPosition(lat: number, hour: number, decDeg: number) {
   return { azimuth: az, elevation: (elR * 180) / Math.PI };
 }
 
-// ── GeoJSON building → Three.js BoxGeometry ───────────────────────────────────
+// ── GeoJSON building → Three.js ExtrudeGeometry ───────────────────────────────
 
 interface GeoFeature {
   geometry?: { coordinates?: number[][][] };
-  properties?: { height?: number; building?: string };
+  properties?: { height?: number; "building:levels"?: number; levels?: number; building?: string };
+}
+
+function getBuildingHeight(props: GeoFeature["properties"]): number {
+  if (!props) return 8;
+  if (typeof props.height === "number" && props.height > 0) return props.height;
+  const levels = props["building:levels"] ?? props.levels;
+  if (typeof levels === "number" && levels > 0) return levels * 3.5;
+  return 8;
+}
+
+function buildingColor(heightM: number): number {
+  if (heightM < 10) return 0xb0bec5;
+  if (heightM < 20) return 0x90a4ae;
+  if (heightM < 40) return 0x64748b;
+  if (heightM < 80) return 0x475569;
+  return 0x334155;
 }
 
 function featureToMesh(f: GeoFeature, lat0: number, lon0: number): THREE.Mesh | null {
   const ring = f.geometry?.coordinates?.[0];
   if (!ring || ring.length < 3) return null;
 
-  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  const heightM = getBuildingHeight(f.properties);
+  const h = Math.max(0.4, heightM * SCENE_SCALE);
+
+  // Build a THREE.Shape from the actual polygon footprint (accurate shape, not box)
+  const shape = new THREE.Shape();
+  let first = true;
   for (const c of ring) {
     if (c.length < 2) continue;
     const [x, z] = geoToScene(lat0, lon0, c[1], c[0]);
-    if (x < minX) minX = x; if (x > maxX) maxX = x;
-    if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+    // Use (x, -z) so that after rotateX(-PI/2) the building lands at correct (x, z) in scene
+    if (first) { shape.moveTo(x, -z); first = false; }
+    else shape.lineTo(x, -z);
   }
-  const w = Math.max(0.3, maxX - minX);
-  const d = Math.max(0.3, maxZ - minZ);
-  const cx = (minX + maxX) / 2;
-  const cz = (minZ + maxZ) / 2;
-  const hM = typeof f.properties?.height === "number" ? f.properties.height : 8;
-  const h  = Math.max(0.4, hM * SCENE_SCALE * BUILD_H_MULT);
+  if (first) return null; // no valid coordinates
 
-  const geo  = new THREE.BoxGeometry(w, h, d);
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false });
+  geo.rotateX(-Math.PI / 2); // extrusion now goes along scene Y (up)
+
   const mesh = new THREE.Mesh(
     geo,
-    new THREE.MeshLambertMaterial({ color: 0x94a3b8 })
+    new THREE.MeshLambertMaterial({ color: buildingColor(heightM) })
   );
-  mesh.position.set(cx, h / 2, cz);
+  mesh.position.y = 0; // base at ground level
   mesh.castShadow    = true;
   mesh.receiveShadow = true;
   return mesh;
@@ -153,7 +172,7 @@ const CAM_LABELS: Record<CamPreset, string> = {
 
 interface PropertyView3DProps { lat: number; lon: number }
 
-export default function PropertyView3D({ lat, lon }: PropertyView3DProps) {
+export default function PropertyView3D({ lat, lon }: Readonly<PropertyView3DProps>) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef    = useRef<HTMLCanvasElement>(null);
 
@@ -174,9 +193,11 @@ export default function PropertyView3D({ lat, lon }: PropertyView3DProps) {
   const [error,     setError]     = useState("");
   const [loading,   setLoading]   = useState(true);
   const [tileMsg,   setTileMsg]   = useState("Loading satellite imagery…");
+  const [hasDragged, setHasDragged] = useState(false);
 
   const theta      = useRef(Math.PI * 0.75);
   const phi        = useRef(Math.PI / 3.5);
+  const orbitR     = useRef(ORBIT_R_INIT);
   const isDragging = useRef(false);
   const lastMouse  = useRef({ x: 0, y: 0 });
 
@@ -196,13 +217,24 @@ export default function PropertyView3D({ lat, lon }: PropertyView3DProps) {
     );
     r.sunLight.target.position.set(0, 0, 0);
     r.sunLight.target.updateMatrixWorld();
-    r.sunLight.intensity = el > 0 ? 1.8 : 0.1;
 
-    r.scene.background = el > 10
-      ? new THREE.Color(0.15, 0.45, 0.90)
-      : el > 0
-      ? new THREE.Color(0.50, 0.30, 0.12)
-      : new THREE.Color(0.01, 0.01, 0.06);
+    if (el <= 0) {
+      r.sunLight.intensity = 0;
+      r.sunLight.color.setRGB(0.1, 0.1, 0.2);
+      r.scene.background = new THREE.Color(0.01, 0.01, 0.06);
+    } else if (el < 5) {
+      r.sunLight.intensity = 0.5;
+      r.sunLight.color.setRGB(1, 0.45, 0.1);
+      r.scene.background = new THREE.Color(0.55, 0.22, 0.05);
+    } else if (el < 15) {
+      r.sunLight.intensity = 1.2;
+      r.sunLight.color.setRGB(1, 0.75, 0.35);
+      r.scene.background = new THREE.Color(0.7, 0.42, 0.18);
+    } else {
+      r.sunLight.intensity = 2;
+      r.sunLight.color.setRGB(1, 0.97, 0.87);
+      r.scene.background = new THREE.Color(0.15, 0.47, 0.92);
+    }
   }, []);
 
   useEffect(() => { updateSun(sunAz, sunEl); }, [sunAz, sunEl, updateSun]);
@@ -228,28 +260,32 @@ export default function PropertyView3D({ lat, lon }: PropertyView3DProps) {
     renderer.shadowMap.enabled     = true;
     renderer.shadowMap.type        = THREE.PCFSoftShadowMap;
     renderer.toneMapping           = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure   = 1.2;
+    renderer.toneMappingExposure   = 1.3;
 
     const scene  = new THREE.Scene();
-    scene.background = new THREE.Color(0.15, 0.45, 0.90);
-    scene.fog        = new THREE.Fog(0x87ceeb, 40, 120);
+    scene.background = new THREE.Color(0.15, 0.45, 0.9);
+    scene.fog        = new THREE.FogExp2(0x87ceeb, 0.006);
 
-    const camera = new THREE.PerspectiveCamera(50, w / h, 0.1, 400);
+    const camera = new THREE.PerspectiveCamera(48, w / h, 0.1, 500);
 
-    // Lights
-    scene.add(new THREE.AmbientLight(0xb0c4de, 0.4));
-    const sunLight = new THREE.DirectionalLight(0xfff8e1, 1.8);
+    scene.add(new THREE.AmbientLight(0xc8d8f0, 0.55));
+    const hemiLight = new THREE.HemisphereLight(0x87ceeb, 0x3a5a40, 0.4);
+    scene.add(hemiLight);
+
+    const sunLight = new THREE.DirectionalLight(0xfff4d0, 2);
     sunLight.castShadow = true;
-    sunLight.shadow.mapSize.set(2048, 2048);
+    sunLight.shadow.mapSize.set(4096, 4096);
     sunLight.shadow.camera.near   = 0.5;
-    sunLight.shadow.camera.far    = 100;
+    sunLight.shadow.camera.far    = 120;
     sunLight.shadow.camera.left   = -35;
     sunLight.shadow.camera.right  =  35;
     sunLight.shadow.camera.top    =  35;
     sunLight.shadow.camera.bottom = -35;
+    sunLight.shadow.bias          = -0.0005;
+    sunLight.shadow.normalBias    =  0.02;
     scene.add(sunLight, sunLight.target);
 
-    // Ground plane — initially flat green; satellite texture applied async
+    // Ground plane — satellite texture applied async
     const ground = new THREE.Mesh(
       new THREE.PlaneGeometry(GROUND_SIZE, GROUND_SIZE, 1, 1),
       new THREE.MeshLambertMaterial({ color: 0x3a5a40 })
@@ -261,14 +297,11 @@ export default function PropertyView3D({ lat, lon }: PropertyView3DProps) {
     // Property marker — amber glowing pillar
     const markerMesh = new THREE.Mesh(
       new THREE.CylinderGeometry(0.15, 0.15, 2.5, 16),
-      new THREE.MeshStandardMaterial({
-        color: 0xf59e0b, emissive: 0xf59e0b, emissiveIntensity: 0.7,
-      })
+      new THREE.MeshStandardMaterial({ color: 0xf59e0b, emissive: 0xf59e0b, emissiveIntensity: 0.7 })
     );
     markerMesh.position.set(0, 1.25, 0);
     scene.add(markerMesh);
 
-    // Marker halo ring at ground level
     const haloMesh = new THREE.Mesh(
       new THREE.RingGeometry(0.6, 1.2, 32),
       new THREE.MeshBasicMaterial({ color: 0xf59e0b, side: THREE.DoubleSide, transparent: true, opacity: 0.45 })
@@ -277,13 +310,13 @@ export default function PropertyView3D({ lat, lon }: PropertyView3DProps) {
     haloMesh.position.y = 0.01;
     scene.add(haloMesh);
 
-    // Animate
     function animate() {
       const id = requestAnimationFrame(animate);
       if (sceneRef.current) sceneRef.current.animId = id;
-      const x = ORBIT_R * Math.sin(phi.current) * Math.cos(theta.current);
-      const y = ORBIT_R * Math.cos(phi.current);
-      const z = ORBIT_R * Math.sin(phi.current) * Math.sin(theta.current);
+      const r = orbitR.current;
+      const x = r * Math.sin(phi.current) * Math.cos(theta.current);
+      const y = r * Math.cos(phi.current);
+      const z = r * Math.sin(phi.current) * Math.sin(theta.current);
       camera.position.set(x, y, z);
       camera.lookAt(0, 0, 0);
       renderer.render(scene, camera);
@@ -293,8 +326,11 @@ export default function PropertyView3D({ lat, lon }: PropertyView3DProps) {
     sceneRef.current = { renderer, camera, scene, sunLight, ground, animId: 0 };
     updateSun(sunAz, sunEl);
     setLoading(false);
+    void loadSceneData();
+  }, [lat, lon, updateSun, sunAz, sunEl]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // ── Async: satellite tiles ────────────────────────────────────────────
+  // Extracted so initScene stays under cognitive-complexity limit
+  const loadSceneData = useCallback(async () => {
     setTileMsg("Loading ESRI satellite imagery…");
     const tex = await buildSatelliteTexture(lat, lon);
     if (tex && sceneRef.current) {
@@ -302,14 +338,12 @@ export default function PropertyView3D({ lat, lon }: PropertyView3DProps) {
       mat.map   = tex;
       mat.color.set(0xffffff);
       mat.needsUpdate = true;
-      setTileMsg("🛰 ESRI World Imagery");
+      setTileMsg("ESRI World Imagery");
     } else {
-      setTileMsg("⚠ Satellite imagery unavailable");
+      setTileMsg("Satellite imagery unavailable");
     }
-
-    // ── Async: OSM buildings from /neighbors ─────────────────────────────
     try {
-      const res = await fetch(`${API}/neighbors?lat=${lat}&lon=${lon}&radius=250`);
+      const res = await fetch(`${API}/neighbors?lat=${lat}&lon=${lon}&radius=300`);
       if (res.ok) {
         const gj = (await res.json()) as { features?: GeoFeature[] };
         if (sceneRef.current) {
@@ -319,8 +353,8 @@ export default function PropertyView3D({ lat, lon }: PropertyView3DProps) {
           }
         }
       }
-    } catch { /* OSM unavailable — scene still works */ }
-  }, [lat, lon, updateSun, sunAz, sunEl]);
+    } catch { /* OSM unavailable */ }
+  }, [lat, lon]);
 
   // Init with 50ms defer so container has dimensions
   useEffect(() => {
@@ -357,10 +391,26 @@ export default function PropertyView3D({ lat, lon }: PropertyView3DProps) {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
+  // Wheel zoom
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      orbitR.current = Math.max(ORBIT_R_MIN, Math.min(ORBIT_R_MAX, orbitR.current + e.deltaY * 0.04));
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+  }, []);
+
   // Pointer / touch drag → orbit
-  const onMouseDown  = (e: React.MouseEvent)  => { isDragging.current = true; lastMouse.current = { x: e.clientX, y: e.clientY }; };
+  const onMouseDown  = (e: React.MouseEvent)  => {
+    isDragging.current = true;
+    lastMouse.current  = { x: e.clientX, y: e.clientY };
+  };
   const onMouseMove  = (e: React.MouseEvent)  => {
     if (!isDragging.current) return;
+    setHasDragged(true);
     theta.current -= (e.clientX - lastMouse.current.x) * 0.012;
     phi.current    = Math.max(0.05, Math.min(Math.PI / 2.05, phi.current + (e.clientY - lastMouse.current.y) * 0.012));
     lastMouse.current = { x: e.clientX, y: e.clientY };
@@ -373,6 +423,7 @@ export default function PropertyView3D({ lat, lon }: PropertyView3DProps) {
   };
   const onTouchMove  = (e: React.TouchEvent) => {
     if (!isDragging.current || e.touches.length !== 1) return;
+    setHasDragged(true);
     theta.current -= (e.touches[0].clientX - lastMouse.current.x) * 0.012;
     phi.current    = Math.max(0.05, Math.min(Math.PI / 2.05, phi.current + (e.touches[0].clientY - lastMouse.current.y) * 0.012));
     lastMouse.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
@@ -448,10 +499,11 @@ export default function PropertyView3D({ lat, lon }: PropertyView3DProps) {
           ))}
         </div>
 
-        {/* Satellite label */}
+        {/* Satellite + scroll hint label */}
         {!loading && (
-          <div className="absolute top-12 left-3 bg-black/60 text-white/60 text-[10px] px-2 py-0.5 rounded-md">
-            {tileMsg}
+          <div className="absolute top-12 left-3 flex flex-col gap-1">
+            <div className="bg-black/60 text-white/60 text-[10px] px-2 py-0.5 rounded-md">{tileMsg}</div>
+            <div className="bg-black/60 text-white/40 text-[10px] px-2 py-0.5 rounded-md">Scroll to zoom</div>
           </div>
         )}
 
@@ -459,7 +511,7 @@ export default function PropertyView3D({ lat, lon }: PropertyView3DProps) {
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 pointer-events-auto w-full max-w-md px-4">
           <div className="bg-black/70 backdrop-blur-sm rounded-xl px-4 py-3 border border-white/10">
             <div className="flex items-center justify-between mb-2">
-              <span className="text-xs text-white/80">{sunEl > 0 ? "☀ Daytime" : "☽ Night"}</span>
+              <span className="text-xs text-white/80">{sunEl > 0 ? "Daytime" : "Night"}</span>
               <span className="text-xs font-mono font-bold text-amber-400">
                 {fmtHour(hourOfDay)} · {MONTH_NAMES[month - 1]} {day}
               </span>
@@ -467,7 +519,7 @@ export default function PropertyView3D({ lat, lon }: PropertyView3DProps) {
             </div>
             <input
               type="range" min={0} max={24} step={0.25} value={hourOfDay}
-              onChange={(e) => setHourOfDay(parseFloat(e.target.value))}
+              onChange={(e) => setHourOfDay(Number.parseFloat(e.target.value))}
               className="w-full accent-amber-400 cursor-pointer h-1.5 rounded-full"
               aria-label={`Time of day: ${fmtHour(hourOfDay)}`}
             />
@@ -483,18 +535,20 @@ export default function PropertyView3D({ lat, lon }: PropertyView3DProps) {
         <div className="absolute bottom-4 left-3 pointer-events-none">
           <div className="bg-black/65 backdrop-blur-sm rounded-lg px-2 py-1.5 border border-white/10 text-[10px] space-y-0.5">
             <div className="flex items-center gap-1.5 text-white/70">
-              <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />
-              Property location
+              <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0"></span>
+              <span>Property location</span>
             </div>
             <div className="text-white/40">Buildings: OpenStreetMap</div>
             <div className="text-white/40">Imagery: ESRI World</div>
           </div>
         </div>
 
-        {/* Drag hint — fades after interaction */}
-        {!isDragging.current && (
+        {/* Drag hint — disappears after first drag */}
+        {!hasDragged && !loading && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            <span className="text-[11px] text-white/20 select-none">Drag to rotate</span>
+            <span className="text-[11px] text-white/25 select-none bg-black/30 px-3 py-1 rounded-full">
+              Drag to rotate · Scroll to zoom
+            </span>
           </div>
         )}
 

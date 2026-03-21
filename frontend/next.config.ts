@@ -10,9 +10,7 @@ const nextConfig: NextConfig = {
   images: {
     domains: ["api.mapbox.com"],
   },
-  experimental: {
-    typedRoutes: true,
-  },
+  experimental: {},
 };
 
 // next-pwa 5.x uses CommonJS — wrap after defining nextConfig

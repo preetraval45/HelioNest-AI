@@ -341,7 +341,7 @@ async def solar_shadow_sweep(
         solar_noon_hour=sweep.solar_noon_hour,
     )
 
-    await cache_set(cache_key, result.model_dump(), ttl=3600)
+    await cache_set(cache_key, result.model_dump(mode="json"), ttl=3600)
     return result
 
 
@@ -418,5 +418,5 @@ async def solar_roi(
         irradiance_source=irr_source,
     )
 
-    await cache_set(cache_key, result.model_dump(), ttl=21600)
+    await cache_set(cache_key, result.model_dump(mode="json"), ttl=21600)
     return result

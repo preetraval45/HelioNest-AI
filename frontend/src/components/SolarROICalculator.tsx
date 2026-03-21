@@ -6,6 +6,38 @@ const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
+// ── State solar incentive table ────────────────────────────────────────────────
+// Federal ITC: 30% through 2032 (Inflation Reduction Act)
+const FEDERAL_ITC_PCT = 30;
+
+type Incentive = { state_pct: number; note: string };
+const STATE_INCENTIVES: Record<string, Incentive> = {
+  CA: { state_pct: 0,  note: "Net metering + SGIP battery rebate up to $1,000/kWh" },
+  NY: { state_pct: 25, note: "NY-Sun Megawatt Block + 25% state tax credit (max $5,000)" },
+  MA: { state_pct: 15, note: "SMART program + 15% state tax credit" },
+  NJ: { state_pct: 0,  note: "Transition Renewable Energy Certificates (TRECs) + net metering" },
+  TX: { state_pct: 0,  note: "Property tax exemption on added home value from solar" },
+  FL: { state_pct: 0,  note: "Sales tax exemption (6%) on solar equipment purchase" },
+  AZ: { state_pct: 25, note: "25% state tax credit (max $1,000)" },
+  CO: { state_pct: 0,  note: "Xcel Energy Solar*Rewards — up to $0.05/kWh produced" },
+  NC: { state_pct: 0,  note: "Duke/Dominion net metering + Renewable Energy Property Tax credit" },
+  WA: { state_pct: 0,  note: "Sales & use tax exemption on solar equipment" },
+  OR: { state_pct: 0,  note: "Oregon Residential Energy Tax Credit + Energy Trust rebates" },
+  IL: { state_pct: 0,  note: "Illinois Shines incentive program (SREC payments)" },
+  MN: { state_pct: 0,  note: "Made in MN Solar Incentive program rebates" },
+  VA: { state_pct: 0,  note: "Dominion/Appalachian net metering + land use tax exemption" },
+  OH: { state_pct: 0,  note: "Ohio property tax exemption on solar installations" },
+  PA: { state_pct: 0,  note: "Pennsylvania SREC market + net metering" },
+  GA: { state_pct: 0,  note: "Georgia net metering + potential utility rebates" },
+  NV: { state_pct: 0,  note: "NV Energy net metering + property tax exemption" },
+  HI: { state_pct: 35, note: "35% Hawaii state tax credit (max $5,000 per system)" },
+  MD: { state_pct: 0,  note: "Residential Clean Energy Rebate $1,000 + net metering" },
+  CT: { state_pct: 0,  note: "Green Bank low-interest loans + residential solar incentive" },
+  MO: { state_pct: 0,  note: "Ameren/KCP&L net metering available" },
+  SC: { state_pct: 25, note: "25% state tax credit (max $3,500/yr, up to $35,000)" },
+  UT: { state_pct: 25, note: "25% state tax credit (max $2,000)" },
+};
+
 interface ROIData {
   system_kw: number;
   roof_area_sqm: number;
@@ -25,13 +57,14 @@ interface ROIData {
 interface Props {
   lat: number;
   lon: number;
+  state?: string; // 2-letter abbreviation e.g. "CA"
 }
 
 function fmt(n: number, decimals = 0) {
   return n.toLocaleString("en-US", { maximumFractionDigits: decimals });
 }
 
-function MonthlyBarChart({ data }: { data: number[] }) {
+function MonthlyBarChart({ data }: Readonly<{ data: number[] }>) {
   const max = Math.max(...data, 1);
   return (
     <div className="mt-4">
@@ -39,13 +72,13 @@ function MonthlyBarChart({ data }: { data: number[] }) {
       <div className="flex items-end gap-1 h-20">
         {data.map((val, i) => {
           const pct = (val / max) * 100;
+          const month = MONTHS[i] ?? String(i + 1);
           return (
-            <div key={i} className="flex-1 flex flex-col items-center gap-0.5 group relative">
+            <div key={month} className="flex-1 flex flex-col items-center gap-0.5 group relative">
               <div
                 className="w-full rounded-t bg-gradient-to-t from-amber-600 to-amber-400 transition-all"
                 style={{ height: `${pct}%` }}
               />
-              {/* Tooltip */}
               <div className="absolute -top-7 left-1/2 -translate-x-1/2 hidden group-hover:block bg-gray-900 text-white text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap z-10">
                 {fmt(val)} kWh
               </div>
@@ -62,12 +95,169 @@ function MonthlyBarChart({ data }: { data: number[] }) {
   );
 }
 
-export default function SolarROICalculator({ lat, lon }: Props) {
+// ── 20-year degradation chart ──────────────────────────────────────────────────
+const DEGRADATION = 0.005; // 0.5% per year (industry standard)
+
+function TwentyYearChart({ annualKwh, annualSavings, systemCost, paybackYears }: Readonly<{
+  annualKwh: number; annualSavings: number; systemCost: number; paybackYears: number;
+}>) {
+  const years = Array.from({ length: 20 }, (_, i) => {
+    const yr = i + 1;
+    const kwh = annualKwh * Math.pow(1 - DEGRADATION, i);
+    const savings = annualSavings * Math.pow(1 - DEGRADATION, i);
+    return { yr, kwh, savings };
+  });
+
+  const maxKwh = Math.max(...years.map((y) => y.kwh), 1);
+  const cumulativeSavings = years.map((y, i) => ({
+    yr: y.yr,
+    cumNet: years.slice(0, i + 1).reduce((s, r) => s + r.savings, 0) - systemCost,
+  }));
+  const maxCum = Math.max(...cumulativeSavings.map((c) => Math.abs(c.cumNet)), 1);
+
+  return (
+    <div className="mt-4 space-y-4">
+      {/* Production bar chart */}
+      <div>
+        <p className="text-xs text-th-muted mb-2">Annual Production (kWh) — 0.5%/yr degradation</p>
+        <div className="flex items-end gap-0.5 h-16">
+          {years.map(({ yr, kwh }) => {
+            const pct = (kwh / maxKwh) * 100;
+            const isPayback = yr === Math.ceil(paybackYears);
+            return (
+              <div key={yr} className="flex-1 flex flex-col items-center group relative">
+                <div
+                  className={`w-full rounded-t transition-all ${isPayback ? "bg-emerald-500" : "bg-gradient-to-t from-amber-700 to-amber-500"}`}
+                  style={{ height: `${pct}%` }}
+                />
+                <div className="absolute -top-7 left-1/2 -translate-x-1/2 hidden group-hover:block bg-gray-900 text-white text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap z-10">
+                  Yr {yr}: {fmt(kwh)} kWh
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="flex gap-0.5 mt-1">
+          {years.map(({ yr }) => (
+            <div key={yr} className="flex-1 text-center text-[7px] text-th-muted">{yr}</div>
+          ))}
+        </div>
+        <p className="text-[9px] text-th-muted mt-0.5">Year 1–20  ·  green bar = payback year</p>
+      </div>
+
+      {/* Cumulative net savings chart */}
+      <div>
+        <p className="text-xs text-th-muted mb-2">Cumulative Net Savings (after system cost)</p>
+        <div className="relative flex items-end gap-0.5 h-16">
+          {/* Zero line */}
+          <div
+            className="absolute left-0 right-0 border-t border-dashed border-th-border/60"
+            style={{ bottom: `${(systemCost / maxCum) * 50}%` }}
+          />
+          {cumulativeSavings.map(({ yr, cumNet }) => {
+            const isPos = cumNet >= 0;
+            const heightPct = (Math.abs(cumNet) / maxCum) * 100;
+            return (
+              <div key={yr} className="flex-1 flex flex-col items-center group relative">
+                {isPos ? (
+                  <div className="w-full flex flex-col justify-end" style={{ height: "100%" }}>
+                    <div
+                      className="w-full rounded-t bg-emerald-500/80 transition-all"
+                      style={{ height: `${Math.min(heightPct, 100)}%` }}
+                    />
+                  </div>
+                ) : (
+                  <div className="w-full flex flex-col justify-end" style={{ height: "50%" }}>
+                    <div
+                      className="w-full rounded-b bg-red-500/60 transition-all"
+                      style={{ height: `${Math.min(heightPct * 2, 100)}%` }}
+                    />
+                  </div>
+                )}
+                <div className="absolute -top-7 left-1/2 -translate-x-1/2 hidden group-hover:block bg-gray-900 text-white text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap z-10">
+                  Yr {yr}: {cumNet >= 0 ? "+" : ""}{fmt(cumNet)} USD
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="flex gap-0.5 mt-1">
+          {cumulativeSavings.map(({ yr }) => (
+            <div key={yr} className="flex-1 text-center text-[7px] text-th-muted">{yr}</div>
+          ))}
+        </div>
+        <p className="text-[9px] text-th-muted mt-0.5">Green = net profit  ·  Red = pre-payback investment</p>
+      </div>
+    </div>
+  );
+}
+
+// ── Solar Incentive Card ───────────────────────────────────────────────────────
+function IncentiveCard({ stateCode, systemCost }: Readonly<{ stateCode: string | undefined; systemCost: number }>) {
+  const federal = Math.round(systemCost * FEDERAL_ITC_PCT / 100);
+  const stateData = stateCode ? STATE_INCENTIVES[stateCode.toUpperCase()] : undefined;
+  const stateCredit = stateData ? Math.round(systemCost * stateData.state_pct / 100) : 0;
+  const totalSavings = federal + stateCredit;
+
+  return (
+    <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/5 p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-semibold text-emerald-400">Available Tax Incentives</p>
+        <span className="text-lg font-bold text-emerald-400">${fmt(totalSavings)} off</span>
+      </div>
+
+      <div className="space-y-2">
+        {/* Federal ITC */}
+        <div className="flex items-start justify-between gap-2 text-xs">
+          <div>
+            <p className="text-th-text font-medium">Federal ITC (30%)</p>
+            <p className="text-th-muted text-[10px]">Inflation Reduction Act — valid through 2032</p>
+          </div>
+          <span className="text-emerald-400 font-bold shrink-0">${fmt(federal)}</span>
+        </div>
+
+        {/* State incentive */}
+        {stateData && (
+          <div className="flex items-start justify-between gap-2 text-xs">
+            <div>
+              <p className="text-th-text font-medium">{stateCode?.toUpperCase()} State ({stateData.state_pct > 0 ? `${stateData.state_pct}%` : "Rebate"})</p>
+              <p className="text-th-muted text-[10px]">{stateData.note}</p>
+            </div>
+            {stateData.state_pct > 0 && (
+              <span className="text-emerald-400 font-bold shrink-0">${fmt(stateCredit)}</span>
+            )}
+          </div>
+        )}
+
+        {!stateData && stateCode && (
+          <p className="text-[10px] text-th-muted">
+            Check your state energy office for additional rebates and net metering policies.
+          </p>
+        )}
+
+        {!stateCode && (
+          <p className="text-[10px] text-th-muted">
+            Enter a US address with state to see state-specific incentives.
+          </p>
+        )}
+      </div>
+
+      <p className="text-[9px] text-th-muted border-t border-th-border/50 pt-2">
+        Estimates only. Consult a tax professional. Federal ITC applies as a dollar-for-dollar
+        reduction of income tax owed.
+      </p>
+    </div>
+  );
+}
+
+// ── Main component ─────────────────────────────────────────────────────────────
+export default function SolarROICalculator({ lat, lon, state }: Readonly<Props>) {
   const [roofArea, setRoofArea] = useState(50);
   const [systemKw, setSystemKw] = useState(6);
-  const [rate, setRate] = useState(0.13);
+  const [rate, setRate] = useState(0.16);
   const [data, setData] = useState<ROIData | null>(null);
   const [loading, setLoading] = useState(false);
+  const [showLongTerm, setShowLongTerm] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -139,7 +329,7 @@ export default function SolarROICalculator({ lat, lon }: Props) {
           <input
             id="roi-rate"
             type="range"
-            min={0.05} max={0.40} step={0.01}
+            min={0.05} max={0.4} step={0.01}
             value={rate}
             onChange={(e) => setRate(Number(e.target.value))}
             className="w-full accent-amber-500 cursor-pointer"
@@ -148,7 +338,7 @@ export default function SolarROICalculator({ lat, lon }: Props) {
         </div>
       </div>
 
-      {/* Results */}
+      {/* Loading */}
       {loading && (
         <div className="flex items-center gap-2 text-sm text-th-muted">
           <div className="w-4 h-4 border-2 border-amber-500 border-t-transparent rounded-full animate-spin" />
@@ -193,13 +383,36 @@ export default function SolarROICalculator({ lat, lon }: Props) {
             <span>System cost: <strong className="text-th-text">${fmt(data.system_cost_usd)}</strong></span>
             <span>Annual savings: <strong className="text-th-text">${fmt(data.annual_savings_usd)}</strong></span>
             <span>20-yr savings: <strong className="text-th-text">${fmt(data.twenty_year_savings_usd)}</strong></span>
-            <span>≈ <strong className="text-th-text">{data.co2_offset_trees}</strong> trees/yr</span>
+            <span>≈ <strong className="text-th-text">{data.co2_offset_trees}</strong> trees/yr equivalent</span>
+            <span>Est. panels: <strong className="text-th-text">~{Math.ceil(data.roof_area_sqm / 2)}</strong> panels</span>
           </div>
+
+          {/* Incentives */}
+          <IncentiveCard stateCode={state} systemCost={data.system_cost_usd} />
 
           {/* Monthly chart */}
           {data.monthly_production_kwh.length === 12 && (
             <MonthlyBarChart data={data.monthly_production_kwh} />
           )}
+
+          {/* 20-year toggle */}
+          <div>
+            <button
+              type="button"
+              onClick={() => setShowLongTerm((v) => !v)}
+              className="flex items-center gap-1.5 text-xs text-amber-400 hover:text-amber-300 transition-colors border border-amber-500/20 hover:border-amber-500/40 rounded-lg px-3 py-1.5 bg-amber-500/5"
+            >
+              {showLongTerm ? "▲ Hide" : "▼ Show"} 20-Year Production &amp; Savings Forecast
+            </button>
+            {showLongTerm && (
+              <TwentyYearChart
+                annualKwh={data.annual_kwh}
+                annualSavings={data.annual_savings_usd}
+                systemCost={data.system_cost_usd}
+                paybackYears={data.payback_years}
+              />
+            )}
+          </div>
         </>
       )}
     </div>
